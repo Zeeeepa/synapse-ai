@@ -3,11 +3,11 @@ import { useEffect, useRef, useState } from 'react';
 import {
     Server, Plus, Trash, RefreshCw, Loader2,
     CheckCircle, XCircle, AlertCircle, Zap,
-    Terminal, Globe, Eye, EyeOff
+    Terminal, Globe, Eye, EyeOff, ShieldAlert
 } from 'lucide-react';
 import { useDispatch } from 'react-redux';
 import { AppDispatch } from '@/store';
-import { setMcpServers, updateMcpServerStatus } from '@/store/settingsSlice';
+import { setMcpServers } from '@/store/settingsSlice';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -87,6 +87,11 @@ const StatusBadge = ({ status }: { status?: string }) => {
             <CheckCircle className="h-2.5 w-2.5" /> Active
         </span>
     );
+    if (status === 'reauth_needed') return (
+        <span className="flex items-center gap-1 text-[10px] bg-orange-500/20 text-orange-400 px-1.5 py-0.5 rounded border border-orange-500/30 uppercase">
+            <ShieldAlert className="h-2.5 w-2.5" /> Re-Auth
+        </span>
+    );
     return (
         <span className="flex items-center gap-1 text-[10px] bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded border border-yellow-500/30 uppercase">
             <XCircle className="h-2.5 w-2.5" /> Disconnected
@@ -115,7 +120,7 @@ const monoInputCls = `${inputCls} font-mono`;
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export const McpServersTab = ({
-    mcpServers, loadingMcp, isConnecting, lastConnected,
+    mcpServers, loadingMcp, isConnecting,
     mcpToast, setMcpToast,
     pendingServerName, onPendingResolved,
     draftMcpServer, setDraftMcpServer,
@@ -145,10 +150,18 @@ export const McpServersTab = ({
         }
     };
 
+    // Background status sync — catches reauth/disconnect signals set by backend
+    // during tool execution without the user needing to manually refresh.
+    useEffect(() => {
+        const id = setInterval(() => refreshServers(true), 30_000);
+        return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     // ── Polling for pending OAuth remote server ────────────────────────────
     // Active only when this tab is visible and pendingServerName is set.
     // Polls /api/mcp/servers every 5 s for up to 60 s; stops on connected.
-    const [pollCountdown, setPollCountdown] = useState(0);
+    const [, setPollCountdown] = useState(0);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const pollEndRef = useRef(0);
@@ -291,9 +304,21 @@ export const McpServersTab = ({
                                     {server.status === 'connecting' && (
                                         <span className="p-2"><Loader2 className="h-3.5 w-3.5 text-blue-400 animate-spin" /></span>
                                     )}
+                                    {server.status === 'reauth_needed' && (
+                                        <button onClick={() => onReconnectServer(server.name)} title="Re-authenticate"
+                                            className="p-2 text-orange-400 hover:text-orange-300 hover:bg-zinc-800 rounded transition-colors">
+                                            <ShieldAlert className="h-3.5 w-3.5" />
+                                        </button>
+                                    )}
                                     {(!server.status || server.status === 'disconnected') && (
                                         <button onClick={() => onReconnectServer(server.name)} title="Retry connection"
                                             className="p-2 text-zinc-500 hover:text-blue-400 hover:bg-zinc-800 rounded transition-colors">
+                                            <RefreshCw className="h-3.5 w-3.5" />
+                                        </button>
+                                    )}
+                                    {server.status === 'connected' && (
+                                        <button onClick={() => onReconnectServer(server.name)} title="Force reconnect (refresh stale session)"
+                                            className="p-2 text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 rounded opacity-0 group-hover:opacity-100 transition-all">
                                             <RefreshCw className="h-3.5 w-3.5" />
                                         </button>
                                     )}

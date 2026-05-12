@@ -647,9 +647,14 @@ export const SettingsView = ({ initialTab = 'general', initialSubTab }: { initia
             if (data.connected) {
                 dispatch(updateMcpServerStatus({ name, status: 'connected' }));
                 setMcpToast({ show: true, message: `✓ ${name} reconnected!`, type: 'success' });
+            } else if (data.needs_oauth && data.auth_url) {
+                // OAuth server needs fresh authentication — open popup and start polling
+                setPendingMcpServerName(name);
+                window.open(data.auth_url, '_blank');
+                setMcpToast({ show: true, message: `Re-authenticating ${name} — complete OAuth in the popup.`, type: 'warning' });
             } else {
                 dispatch(updateMcpServerStatus({ name, status: 'disconnected' }));
-                setMcpToast({ show: true, message: `Could not connect to ${name}. Complete OAuth first.`, type: 'warning' });
+                setMcpToast({ show: true, message: `Could not connect to ${name}. Try re-adding the server.`, type: 'warning' });
             }
             setTimeout(() => setMcpToast(null), 5000);
         } catch {

@@ -331,7 +331,26 @@ async def reconnect_mcp_server(name: str):
         if connected:
             await _register_session(name)
             return {"status": "success", "connected": True, "message": "Reconnected successfully."}
-        return {"status": "failed", "connected": False, "message": "Could not reconnect."}
+
+        # For OAuth-based remote servers (no stored PAT), attempt a fresh OAuth flow
+        config = _server.mcp_manager.get_server_config(name)
+        if config and config.get("server_type") == "remote" and not config.get("token"):
+            auth_url_future: asyncio.Future = asyncio.get_event_loop().create_future()
+            asyncio.create_task(_server.mcp_manager.start_oauth_connect(config, auth_url_future))
+            try:
+                auth_url = await asyncio.wait_for(asyncio.shield(auth_url_future), timeout=10)
+                if auth_url:
+                    return {
+                        "status": "oauth_required",
+                        "connected": False,
+                        "needs_oauth": True,
+                        "auth_url": auth_url,
+                        "message": "Re-authentication required — complete OAuth in the popup.",
+                    }
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+        return {"status": "failed", "connected": False, "needs_oauth": False, "message": "Could not reconnect."}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

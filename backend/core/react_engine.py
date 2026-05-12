@@ -1002,6 +1002,11 @@ async def run_agent_step(
                         _ping_msg = f"MCP session '{agent_name}' unresponsive (ping: {_ping_err}). Skipping '{tool_name}'."
                         print(f"DEBUG MCP: ⚠️ {_ping_msg} [{round(time.time()-_mcp_t0,2)}s]", flush=True)
                         current_context_text += f"\nSystem: Error — {_ping_msg}\n"
+                        try:
+                            _mcp_srv_name = agent_name.removeprefix("ext_mcp_")
+                            server_module.mcp_manager._set_status(_mcp_srv_name, "disconnected")
+                        except Exception:
+                            pass
                         yield {"type": "tool_result", "tool_name": tool_name, "preview": f"Error: session unresponsive"}
                         continue
 
@@ -1026,6 +1031,11 @@ async def run_agent_step(
                     try:
                         parsed = json.loads(raw_output)
                         if "error" in parsed and parsed["error"] == "auth_required":
+                            try:
+                                _mcp_srv_name = agent_name.removeprefix("ext_mcp_")
+                                server_module.mcp_manager._set_status(_mcp_srv_name, "reauth_needed")
+                            except Exception:
+                                pass
                             yield {"type": "final", "response": "Authentication required.", "intent": "request_auth", "data": parsed, "tool_name": tool_name}
                             return
 
@@ -1104,6 +1114,12 @@ async def run_agent_step(
                     error_msg = str(e)
                     print(f"DEBUG: ❌ Tool '{tool_name}' failed: {error_msg}", flush=True)
                     current_context_text += f"\nSystem: Error executing tool {tool_name}: {error_msg}\n"
+                    try:
+                        if agent_name and agent_name.startswith("ext_mcp_"):
+                            _mcp_srv_name = agent_name.removeprefix("ext_mcp_")
+                            server_module.mcp_manager._set_status(_mcp_srv_name, "disconnected")
+                    except Exception:
+                        pass
                     yield {"type": "tool_result", "tool_name": tool_name, "preview": f"Error: {error_msg}"}
 
     if not final_response:
