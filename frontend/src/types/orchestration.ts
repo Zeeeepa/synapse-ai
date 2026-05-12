@@ -76,7 +76,7 @@ export interface StepConfig {
 
 export interface StateSchemaEntry {
     type: string;
-    default: string;
+    default: unknown;
     description: string;
 }
 

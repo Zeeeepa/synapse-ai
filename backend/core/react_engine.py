@@ -865,7 +865,6 @@ async def run_agent_step(
                                         "--read-only",
                                         "--tmpfs", "/tmp:rw,size=256m",
                                         "--tmpfs", "/root:rw,size=256m",
-                                        "--network", "none",
                                         "-v", f"{script_path}:/sandbox/script.py:ro",
                                     ]
                                     if vault_root.exists():

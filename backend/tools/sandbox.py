@@ -483,10 +483,6 @@ def _build_docker_cmd(
         "--tmpfs", "/root:rw,size=512m",
     ]
 
-    if not allow_network:
-        cmd.append("--no-healthcheck")
-        cmd += ["--network", "none"]
-
     cmd += ["-v", f"{script_path}:/sandbox/script.py:ro"]
 
     if VAULT_ROOT.exists():

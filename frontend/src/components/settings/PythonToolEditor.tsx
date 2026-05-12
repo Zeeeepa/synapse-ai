@@ -273,7 +273,7 @@ export function PythonToolEditor({ draft, onChange }: PythonToolEditorProps) {
                     </button>
                 </div>
                 <p className="text-[11px] text-zinc-500 leading-relaxed">
-                    Code runs in a <span className="text-violet-400 font-mono">Docker sandbox</span> (512MB RAM, 1 CPU, no network).
+                    Code runs in a <span className="text-violet-400 font-mono">Docker sandbox</span> (512MB RAM, 1 CPU, internet enabled).
                     Vault files are mounted at <span className="font-mono text-violet-300">/data/</span>.
                     Arguments are injected as <span className="font-mono text-violet-300">_args</span> (dict).
                     <span className="font-mono text-zinc-400"> print()</span> stdout becomes the tool result.
