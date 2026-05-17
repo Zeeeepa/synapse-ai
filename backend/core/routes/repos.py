@@ -57,8 +57,16 @@ async def get_repos():
                         r["file_count"] = stats["count"]
                         updated = True
                 elif stats["status"] == "error":
-                    if r.get("status") != "error":
+                    msg = stats.get("message", "")
+                    # Preserve "indexed" status only through transient connection
+                    # exhaustion ("too many clients"). Genuine errors (missing table,
+                    # schema mismatch) still flip the status so they stay visible.
+                    is_connection_exhaustion = "too many clients" in msg or "remaining connection slots" in msg
+                    if r.get("status") not in ("error",) and not (
+                        r.get("status") == "indexed" and is_connection_exhaustion
+                    ):
                         r["status"] = "error"
+                        r["error_message"] = msg
                         updated = True
             if updated:
                 save_repos(repos)
