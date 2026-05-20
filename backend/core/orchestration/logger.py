@@ -181,11 +181,19 @@ class OrchestrationLogger:
      Preview: {preview}
 """)
 
+        elif etype == "llm_reasoning":
+            reasoning = event.get("reasoning", "")
+            turn = event.get("turn", "")
+            self._write(f"""
+  💭 REASONING (turn {turn}):
+{self._indent(reasoning)}
+""")
+
         elif etype == "llm_thought":
             thought = event.get("thought", "")
             turn = event.get("turn", "")
             self._write(f"""
-  🧠 LLM THOUGHT (turn {turn}):
+  🛠️  ACTION (turn {turn}):
 {self._indent(thought)}
 """)
 

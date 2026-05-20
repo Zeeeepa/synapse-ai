@@ -564,7 +564,17 @@ def _format_context_value(
     label: str,
     max_chars: int = 5000,
 ) -> str:
-    """Format a single shared_state value for inclusion in the prompt."""
+    """Format a single shared_state value for inclusion in the prompt.
+
+    Format:
+        ### <key>
+        Source: <producer agent or upstream description>
+        <value>
+
+    The bare key (no brackets) is used as the header so the heading cannot be
+    visually confused with `{state.<key>}` template placeholders. The Source
+    line carries provenance (which agent / step produced this value).
+    """
     # List values from loop/parallel accumulation
     if isinstance(val, list) and val and isinstance(val[0], dict) and "result" in val[0]:
         parts = []
@@ -575,16 +585,17 @@ def _format_context_value(
             if len(result_str) > max_chars:
                 from .summarizer import smart_truncate
                 result_str = smart_truncate(result_str, max_chars)
-            iter_label = f" (Iteration {iteration})" if iteration else ""
-            source = f"{agent} → {key}{iter_label}" if agent else f"{key}{iter_label}"
-            parts.append(f"### [{source}]\n{result_str}")
+            iter_suffix = f" (iteration {iteration})" if iteration else ""
+            source = f"{agent} → {key}" if agent else f"loop accumulator → {key}"
+            parts.append(f"### {key}{iter_suffix}\nSource: {source}\n{result_str}")
         return "\n\n".join(parts)
 
     val_str = str(val)
     if len(val_str) > max_chars:
         from .summarizer import smart_truncate
         val_str = smart_truncate(val_str, max_chars)
-    return f"### [{label}]\n{val_str}"
+    source = label if label and label != key else "shared state"
+    return f"### {key}\nSource: {source}\n{val_str}"
 
 
 def build_origin_aware_context(
@@ -713,7 +724,9 @@ def build_origin_aware_context(
 
     # Always include user_input unless explicitly in input_keys
     if "user_input" in run.shared_state and "user_input" not in (step.input_keys or []):
-        context_parts.append(f"### [user_input]\n{run.shared_state['user_input']}")
+        context_parts.append(
+            f"### user_input\nSource: initial input\n{run.shared_state['user_input']}"
+        )
 
     # Human response keys (always inject unless already listed)
     human_keys = {"human_response"}
@@ -730,7 +743,7 @@ def build_origin_aware_context(
             if len(val) > 3000:
                 from .summarizer import smart_truncate
                 val = smart_truncate(val, 3000)
-            context_parts.append(f"### [{hkey}]\n{val}")
+            context_parts.append(f"### {hkey}\nSource: human response\n{val}")
 
     # Explicitly declared input_keys
     for key in (step.input_keys or []):
@@ -775,7 +788,9 @@ def build_origin_aware_context(
     prompt = "\n\n---\n\n".join(sections)
 
     # ------------------------------------------------------------------
-    # System prompt addition — datetime + workflow graph + step position
+    # System prompt addition — workflow graph + step position
+    # (Date/time is injected separately by build_system_prompt for every
+    # agent including orchestration steps — do not duplicate it here.)
     # ------------------------------------------------------------------
     # Count completed executions per step for the graph (×N badges).
     exec_counts: dict[str, int] = {}
@@ -789,8 +804,6 @@ def build_origin_aware_context(
 
     graph_md = build_workflow_graph_markdown(engine.orch, step.id, exec_counts)
     sys_lines = [
-        datetime_context(),
-        "",
         graph_md,
         "",
         f"You are currently executing step **\"{step_name}\"** (execution #{transition.execution_number}).",

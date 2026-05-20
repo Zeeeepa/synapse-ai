@@ -24,136 +24,156 @@ from core.routes.agents import load_user_agents, get_active_agent_data
 from core.routes.tools import load_custom_tools
 
 import anyio as _anyio
+import re as _re
 from datetime import timedelta
 
 MAX_TURNS = 30
 
 
-def parse_all_tool_calls(llm_output: str) -> list[dict]:
-    """Extract ALL tool-call JSON objects from one LLM response, in order.
+# ──────────────────────────────────────────────────────────────────────────────
+# Reasoning blocks
+#
+# Models wrap their private chain-of-thought in [REASONING]...[/REASONING].
+# The server projects these into a separate `llm_reasoning` event for the UI
+# and orchestration log, then strips them from:
+#   - the user-visible final response
+#   - the accumulated `current_context_text` re-injected next turn
+#
+# Markers are case-insensitive ASCII (no XML) so small/open models handle them
+# as reliably as frontier models.
+# ──────────────────────────────────────────────────────────────────────────────
+_REASONING_BLOCK_RE = _re.compile(
+    r"\[REASONING\](.*?)\[/REASONING\]", _re.DOTALL | _re.IGNORECASE
+)
 
-    Unlike parse_tool_call, non-tool JSON objects are skipped (not an early-exit
-    trigger), so every tool-call found is returned.  The caller executes them
-    sequentially before making the next LLM call.
+
+def strip_reasoning(text: str) -> str:
+    """Return text with all [REASONING]...[/REASONING] blocks removed."""
+    if not text or "[REASONING]" not in text.upper():
+        return text
+    return _REASONING_BLOCK_RE.sub("", text).strip()
+
+
+def extract_reasoning(text: str) -> list[str]:
+    """Return the contents of every [REASONING] block, in order."""
+    if not text:
+        return []
+    return [m.group(1).strip() for m in _REASONING_BLOCK_RE.finditer(text)]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tool-call parsing
+#
+# A single scanner backs both `parse_tool_call` (first call only, early-exits
+# on non-tool JSON) and `parse_all_tool_calls` (every call, no early exit).
+# The divergence is intentional — see the docstring on _scan_tool_calls.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _is_tool_call(obj) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    name = obj.get("tool")
+    return isinstance(name, str) and bool(name.strip())
+
+
+def _scan_tool_calls(llm_output: str, *, stop_on_non_tool_json: bool) -> list[dict]:
+    """Single source of truth for tool-call extraction.
+
+    Strategy (in order):
+      1. If the output contains <tool_call>...</tool_call> XML wrappers (CLI
+         providers like cli.claude/cli.gemini/cli.codex), return every wrapped
+         JSON that looks like a tool call. XML mode is all-or-nothing — when
+         any XML wrapper is found we ignore bare JSON in the same response.
+      2. Otherwise scan for bare JSON objects with a `tool` key. Try every '{'
+         position so that a reasoning preamble before the JSON doesn't break
+         parsing.
+
+    The `stop_on_non_tool_json` flag controls the bare-JSON scan:
+
+      - True  (parse_tool_call semantics): on the first well-formed top-level
+              JSON object that is NOT a tool call, stop and return whatever
+              tool calls were collected so far. This prevents misreading an
+              echoed *tool result* (a dict with no `tool` key) as a new call.
+              Used by callers that only want the first tool call.
+
+      - False (parse_all_tool_calls semantics): non-tool JSON is skipped but
+              scanning continues. The caller executes every tool call in order
+              before the next LLM turn.
+
+    Reasoning blocks are stripped *before* scanning so a `tool` keyword inside
+    [REASONING] prose can never produce a false positive.
     """
-    cleaned = llm_output.replace("```json", "").replace("```", "").strip()
+    cleaned = strip_reasoning(llm_output or "")
+    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
 
-    def _is_tool_call(obj) -> bool:
-        if not isinstance(obj, dict):
-            return False
-        name = obj.get("tool")
-        return isinstance(name, str) and bool(name.strip())
-
-    import re as _re
-
-    # XML <tool_call> wrappers (CLI providers) — collect ALL matches in order
+    # ── 1. XML <tool_call> wrappers (CLI providers) ─────────────────────────
     xml_calls: list[dict] = []
-    for _m in _re.finditer(r"<tool_call>(.*?)</tool_call>", cleaned, _re.DOTALL):
+    for m in _re.finditer(r"<tool_call>(.*?)</tool_call>", cleaned, _re.DOTALL):
         try:
-            obj = json.loads(_m.group(1).strip())
-            if _is_tool_call(obj):
-                xml_calls.append(obj)
+            obj = json.loads(m.group(1).strip())
         except json.JSONDecodeError:
-            pass
+            continue
+        if _is_tool_call(obj):
+            xml_calls.append(obj)
+            if stop_on_non_tool_json:
+                return [xml_calls[0]]
     if xml_calls:
         return xml_calls
 
+    # ── 2. Bare JSON object scan ─────────────────────────────────────────────
     if "{" not in cleaned:
         return []
 
     decoder = json.JSONDecoder()
     tool_calls: list[dict] = []
-    used_end = -1  # end byte of the last decoded JSON blob (skip nested braces inside it)
+    used_end = -1  # byte end of the last decoded blob (skip nested braces)
 
     for pos in [i for i, ch in enumerate(cleaned) if ch == "{"]:
         if pos < used_end:
-            continue  # position is inside a previously consumed JSON object
+            continue
         try:
             obj, end_offset = decoder.raw_decode(cleaned[pos:])
             used_end = pos + end_offset
         except json.JSONDecodeError:
             continue
         if _is_tool_call(obj):
+            if pos > 0 and not tool_calls:
+                preamble = cleaned[:min(pos, 120)].replace("\n", " ")
+                print(
+                    f"DEBUG _scan_tool_calls: ⚠️  JSON tool call found after "
+                    f"{pos} chars of preamble: «{preamble}…»",
+                    flush=True,
+                )
             tool_calls.append(obj)
-        # Non-tool JSON: advance used_end but keep scanning (do NOT stop early)
+            if stop_on_non_tool_json:
+                return [tool_calls[0]]
+        elif isinstance(obj, dict) and stop_on_non_tool_json:
+            print(
+                f"DEBUG _scan_tool_calls: ✅ non-tool JSON at pos={pos}, "
+                f"keys={list(obj.keys())[:5]} → halting scan",
+                flush=True,
+            )
+            return tool_calls
+        # else: not a dict or non-tool dict in all-calls mode → keep scanning
 
     return tool_calls
 
 
+def parse_all_tool_calls(llm_output: str) -> list[dict]:
+    """Extract ALL tool-call JSON objects from one LLM response, in order."""
+    return _scan_tool_calls(llm_output, stop_on_non_tool_json=False)
+
+
 def parse_tool_call(llm_output: str) -> tuple[dict | None, str | None]:
-    """Extract a tool call JSON from LLM text output.
+    """Extract the first tool-call JSON from one LLM response.
 
-    Searches the entire output for a JSON object containing a 'tool' key.
-    This tolerates LLM outputs that include a reasoning preamble before the
-    actual tool-call JSON (common in orchestration agents that plan before
-    acting).  JSON objects that appear at or near the start of the output are
-    tried first so the fast path is preserved for well-behaved models.
-
-    Also handles <tool_call>...</tool_call> XML wrappers emitted by CLI providers
-    (claude, gemini, codex) that are instructed to use this format via system prompt.
-
-    Note: 'name' is deliberately NOT treated as an alias for 'tool' here — it
-    collides with domain JSON (e.g. an orchestration plan has a top-level `name`
-    field) and used to cause the planner's final output to be mis-parsed as a
-    tool call.  All LLM providers normalise their native tool-call shapes to
-    {"tool": ..., "arguments": ...} at the provider boundary before reaching
-    this parser.
+    Returns (tool_call_dict, None) when a tool call is found, otherwise
+    (None, None). Halts on the first well-formed non-tool JSON to avoid
+    re-parsing echoed tool results as new calls.
     """
-    cleaned = llm_output.replace("```json", "").replace("```", "").strip()
-
-    def _is_tool_call(obj) -> bool:
-        if not isinstance(obj, dict):
-            return False
-        name = obj.get("tool")
-        return isinstance(name, str) and bool(name.strip())
-
-    # ── Fast path: <tool_call> XML wrapper (CLI providers) ──────────────────────
-    import re as _re
-    _tc_match = _re.search(r"<tool_call>(.*?)</tool_call>", cleaned, _re.DOTALL)
-    if _tc_match:
-        try:
-            obj = json.loads(_tc_match.group(1).strip())
-            if _is_tool_call(obj):
-                return obj, None
-        except json.JSONDecodeError:
-            pass  # Fall through to bare-JSON detection
-
-    if "{" not in cleaned:
-        return None, None
-
-    decoder = json.JSONDecoder()
-
-    # Collect all '{' positions so we can try each candidate in order.
-    brace_positions = [i for i, ch in enumerate(cleaned) if ch == "{"]
-
-    # Try the earliest position first (fast path for well-behaved models),
-    # then fall back to later positions when there is a preamble.
-    for pos in brace_positions:
-        try:
-            obj, _ = decoder.raw_decode(cleaned[pos:])
-        except json.JSONDecodeError:
-            continue
-        if _is_tool_call(obj):
-            if pos > 0:
-                # LLM prefixed the JSON with preamble text — log it so we
-                # can monitor how often this happens.
-                preamble_preview = cleaned[:min(pos, 120)].replace("\n", " ")
-                print(
-                    f"DEBUG parse_tool_call: ⚠️  JSON tool call found after "
-                    f"{pos} chars of preamble: «{preamble_preview}…»",
-                    flush=True,
-                )
-            return obj, None
-        if isinstance(obj, dict):
-            # Well-formed top-level JSON object but not a tool call (e.g. the
-            # LLM echoed a previous tool *result* as text). Stop scanning —
-            # later '{' positions are nested fields of this same object and
-            # matching them risks treating `{"agents":[{"tool":"..."}]}` as a
-            # real call. Treat this turn as a final text response.
-            print(f"DEBUG parse_tool_call: ✅ non-tool JSON at pos={pos}, keys={list(obj.keys())[:5]} → returning (None, None)", flush=True)
-            return None, None
-
-    return None, None
+    calls = _scan_tool_calls(llm_output, stop_on_non_tool_json=True)
+    return (calls[0] if calls else None), None
 
 
 
@@ -381,6 +401,38 @@ def _inject_delegate_roster(system_template: str, agents_map: dict) -> str:
         elif tools == ["all"]:
             roster_lines.append("  Tools: All available tools")
         roster_lines.append("")
+
+    roster_lines.append("### WHEN TO DELEGATE")
+    roster_lines.append(
+        "- Delegate when the request requires tools, knowledge, or specialized "
+        "prompts you don't have yourself."
+    )
+    roster_lines.append("- Do NOT delegate when:")
+    roster_lines.append(
+        "  - You can answer from the conversation context already in front of you."
+    )
+    roster_lines.append(
+        "  - The request is conversational (greeting, clarification, recap of prior work)."
+    )
+    roster_lines.append(
+        "  - You just received output from the only agent that could handle this "
+        "(would cause a loop)."
+    )
+    roster_lines.append("")
+    roster_lines.append("### HOW TO CHOOSE")
+    roster_lines.append(
+        "- Pick the SINGLE most specific agent. If multiple match, prefer the one "
+        "with the most relevant tools listed."
+    )
+    roster_lines.append(
+        "- After a sub-agent returns, synthesize a final response directly unless "
+        "meaningful additional work is needed — chained delegation is expensive."
+    )
+    roster_lines.append(
+        "- Never delegate back to the agent you received output from in the "
+        "immediately previous step."
+    )
+    roster_lines.append("")
 
     return system_template + "\n\n" + "\n".join(roster_lines)
 
@@ -750,23 +802,46 @@ async def run_agent_step(
             _llm_duration = round(time.time() - _llm_start, 1)
             print(f"DEBUG: 🤖 LLM Response ({_llm_duration}s): {llm_output[:500]}{'...(truncated)' if len(llm_output) > 500 else ''}")
 
-            # Emit LLM thought for frontend (before tool parsing so UI can show reasoning)
-            if llm_output.strip():
-                yield {"type": "llm_thought", "thought": llm_output, "turn": turn + 1}
+            # ── Project [REASONING] blocks into a dedicated event ────────────
+            # The LLM emits its private chain-of-thought wrapped in
+            # [REASONING]...[/REASONING]. We extract those blocks, ship them
+            # to the UI / orchestration log via a structured `llm_reasoning`
+            # event, and feed the *cleaned* action text into both the visible
+            # thought event and the running context. This:
+            #   - gives users readable "thinking" panels above each tool call
+            #   - prevents planning text from compounding across turns
+            #   - leaves the model's wire format unchanged (it still emits
+            #     [REASONING] markers; the projection is purely server-side)
+            reasoning_blocks = extract_reasoning(llm_output)
+            action_text = strip_reasoning(llm_output)
+
+            if reasoning_blocks:
+                yield {
+                    "type": "llm_reasoning",
+                    "reasoning": "\n\n".join(reasoning_blocks),
+                    "turn": turn + 1,
+                }
+
+            if action_text.strip():
+                yield {"type": "llm_thought", "thought": action_text, "turn": turn + 1}
 
             # Parse every tool call the LLM emitted in this response and execute
             # them sequentially before the next LLM turn.  This prevents partial
             # saves when a provider batches multiple calls into one response.
-            tool_calls = parse_all_tool_calls(llm_output)
+            tool_calls = parse_all_tool_calls(action_text)
 
             if not tool_calls:
-                final_response = llm_output
+                # Final response: strip any leftover reasoning so it never
+                # reaches the user or the session history.
+                final_response = action_text
                 break
 
-            # Append the LLM's full reasoning to context once, before any execution,
-            # so the next turn has the chain-of-thought (including the tool-call JSON).
-            if llm_output.strip():
-                current_context_text += f"\nAssistant Thought: {llm_output}\n"
+            # Append the LLM's action text (tool-call JSON + any prose) to the
+            # running context, tagged with the turn number for temporal clarity.
+            # Reasoning blocks are intentionally NOT re-injected — they were
+            # private scratch space for that single turn.
+            if action_text.strip():
+                current_context_text += f"\n[Turn {turn + 1} — Action]\n{action_text}\n"
 
             # ── SPAWN_SUBTASK batch pre-run ──────────────────────────────────────
             # Collect all spawn_subtask calls from this turn and run them in parallel
@@ -868,7 +943,7 @@ async def run_agent_step(
                     _exec_result = await tool_executor(tool_name, tool_args)
                     if _exec_result is not None:
                         raw_output = maybe_vault(tool_name, _exec_result)
-                        current_context_text += f"\nTool '{tool_name}' Output: {raw_output}\n"
+                        current_context_text += f"\n[Turn {turn + 1} — Observation] Tool '{tool_name}' returned:\n{raw_output}\n"
                         tools_used_summary.append(f"{tool_name}: {raw_output}")
                         preview = raw_output[:500] + "..." if len(raw_output) > 500 else raw_output
                         print(f"DEBUG: 🔧 Executor result ({tool_name}): {preview}")
@@ -896,7 +971,7 @@ async def run_agent_step(
                         )
                         sub_name, result_text = results[0] if results else (sub_name, "No result")
 
-                    current_context_text += f"\nSubtask '{sub_name}' result:\n{result_text}\n"
+                    current_context_text += f"\n[Turn {turn + 1} — Observation] Subtask '{sub_name}' result:\n{result_text}\n"
                     tools_used_summary.append(f"spawn_subtask({sub_name}): {result_text[:200]}")
                     preview = result_text[:500] + "..." if len(result_text) > 500 else result_text
                     yield {"type": "tool_result", "tool_name": SPAWN_SUBTASK_TOOL_NAME,
@@ -939,7 +1014,7 @@ async def run_agent_step(
                         print(f"DEBUG: ❌ Delegate sub-agent failed: {e}", flush=True)
 
                     raw_output = maybe_vault(tool_name, sub_final)
-                    current_context_text += f"\nAgent '{agent_name}' Response: {raw_output}\n"
+                    current_context_text += f"\n[Turn {turn + 1} — Observation] Agent '{agent_name}' response:\n{raw_output}\n"
                     tools_used_summary.append(f"delegate_to_agent({agent_name}): {raw_output}")
                     preview = raw_output[:500] + "..." if len(raw_output) > 500 else raw_output
                     print(f"DEBUG: 🤝 Delegate result from '{agent_name}': {preview}")
@@ -955,7 +1030,7 @@ async def run_agent_step(
                         raw_output = await execute_builder_tool(tool_name, tool_args, server_module)
                     except Exception as e:
                         raw_output = json.dumps({"error": str(e)})
-                    current_context_text += f"\nTool '{tool_name}' Output: {raw_output}\n"
+                    current_context_text += f"\n[Turn {turn + 1} — Observation] Tool '{tool_name}' returned:\n{raw_output}\n"
                     tools_used_summary.append(f"{tool_name}: {raw_output}")
                     preview = raw_output[:500] + "..." if len(raw_output) > 500 else raw_output
                     print(f"DEBUG: 🏗 Builder tool ({tool_name}): {preview}")
@@ -1058,7 +1133,7 @@ async def run_agent_step(
                                     _shutil.rmtree(tmp_dir, ignore_errors=True)
 
                                 raw_output = maybe_vault(tool_name, raw_output)
-                                current_context_text += f"\nTool '{tool_name}' Output: {raw_output}\n"
+                                current_context_text += f"\n[Turn {turn + 1} — Observation] Tool '{tool_name}' returned:\n{raw_output}\n"
                                 tools_used_summary.append(f"{tool_name}: {raw_output}")
                                 print(f"DEBUG: 🐍 Python Tool Result ({tool_name}): {raw_output}")
                                 preview = raw_output[:500] + "..." if len(raw_output) > 500 else raw_output
@@ -1146,7 +1221,7 @@ async def run_agent_step(
                             # Vault large outputs
                             raw_output = maybe_vault(tool_name, raw_output)
 
-                            current_context_text += f"\nTool '{tool_name}' Output: {raw_output}\n"
+                            current_context_text += f"\n[Turn {turn + 1} — Observation] Tool '{tool_name}' returned:\n{raw_output}\n"
                             tools_used_summary.append(f"{tool_name}: {raw_output}")
                             print(f"DEBUG: 📤 Tool Result ({tool_name}): {raw_output}")
                             preview = raw_output[:500] + "..." if len(raw_output) > 500 else raw_output
@@ -1300,7 +1375,7 @@ async def run_agent_step(
                         current_context_text += f"{BROWSER_MARKER}Tool '{tool_name}' Output (current page state): {raw_output}{BROWSER_END}"
                         print(f"DEBUG: 📤 Tool Result ({tool_name}): [browser, {len(raw_output)} chars in context, history={len(browser_action_history)} actions]")
                     else:
-                        current_context_text += f"\nTool '{tool_name}' Output: {raw_output}\n"
+                        current_context_text += f"\n[Turn {turn + 1} — Observation] Tool '{tool_name}' returned:\n{raw_output}\n"
                         print(f"DEBUG: 📤 Tool Result ({tool_name}): {raw_output}")
 
                     # MCP tool results are no longer embedded in ChromaDB

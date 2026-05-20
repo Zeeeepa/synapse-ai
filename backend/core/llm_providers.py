@@ -663,15 +663,11 @@ async def call_openai(model, messages, api_key, tools=None, images=None):
             # Handle tool_calls response
             choice = data["choices"][0]
             msg = choice.get("message", {})
+            text = _openai_compat_extract(msg)
             if msg.get("tool_calls"):
-                tc = msg["tool_calls"][0]
-                text = json.dumps({
-                    "tool": tc["function"]["name"],
-                    "arguments": json.loads(tc["function"].get("arguments", "{}"))
-                })
                 return text, input_tokens, output_tokens
             print(f"DEBUG: ✅ OpenAI call complete (attempt {attempt})", flush=True)
-            return msg.get("content", ""), input_tokens, output_tokens
+            return text, input_tokens, output_tokens
         except httpx.TimeoutException:
             last_error = f"Request timed out ({OPENAI_TIMEOUT}s)"
             print(f"DEBUG: ⏱️ OpenAI timeout on attempt {attempt}/{MAX_RETRIES}. Retrying in {backoff}s...", flush=True)
@@ -723,22 +719,56 @@ def _convert_tools_for_anthropic(ollama_tools: list[dict] | None) -> list[dict] 
     return tools if tools else None
 
 
-def _extract_anthropic_response(response) -> str:
-    """Extract text or tool call from an Anthropic SDK response.
+def _openai_compat_extract(msg: dict) -> str:
+    """Normalize an OpenAI-compatible chat-completion message into the
+    `{"tool": ..., "arguments": ...}` shape (or plain text).
 
-    Checks for tool_use content blocks first (native tool calling),
-    then falls back to text blocks.
+    When the model emits BOTH content text and tool_calls in the same response
+    (newer reasoning models, some Claude-compat APIs), the text is preserved as
+    a `[REASONING]...[/REASONING]` preamble so the ReAct loop can project it
+    into the llm_reasoning event for the UI and orchestration log.
+    """
+    tool_calls = msg.get("tool_calls") or []
+    if tool_calls:
+        tc = tool_calls[0]
+        call_json = json.dumps({
+            "tool": tc["function"]["name"],
+            "arguments": json.loads(tc["function"].get("arguments") or "{}"),
+        })
+        reasoning = (msg.get("content") or "").strip()
+        if reasoning:
+            return f"[REASONING]\n{reasoning}\n[/REASONING]\n{call_json}"
+        return call_json
+    return msg.get("content", "") or ""
+
+
+def _extract_anthropic_response(response) -> str:
+    """Extract text and/or tool call from an Anthropic SDK response.
+
+    When the model emits a text block before a tool_use block (Claude does this
+    routinely), preserve the text as a [REASONING]...[/REASONING] preamble so
+    the downstream ReAct loop can project it into the llm_reasoning event.
+    Without this, native tool calling silently drops the model's pre-call
+    reasoning.
     """
     if not response.content:
         return "Error: Empty Anthropic response."
 
-    # Check for tool_use blocks first (native tool calling)
+    text_parts: list[str] = []
+    tool_use_call: dict | None = None
     for block in response.content:
-        if block.type == "tool_use":
-            return json.dumps({"tool": block.name, "arguments": block.input or {}})
+        if block.type == "tool_use" and tool_use_call is None:
+            tool_use_call = {"tool": block.name, "arguments": block.input or {}}
+        elif block.type == "text" and block.text:
+            text_parts.append(block.text)
 
-    # Collect text blocks
-    text_parts = [block.text for block in response.content if block.type == "text" and block.text]
+    if tool_use_call is not None:
+        call_json = json.dumps(tool_use_call)
+        reasoning = "\n".join(t for t in text_parts if t and t.strip()).strip()
+        if reasoning:
+            return f"[REASONING]\n{reasoning}\n[/REASONING]\n{call_json}"
+        return call_json
+
     if text_parts:
         return "\n".join(text_parts)
 
@@ -943,7 +973,14 @@ def _convert_messages_for_gemini(messages: list[dict], images: list[str] | None 
 
 
 def _extract_gemini_response(response) -> str:
-    """Extract text or function call from a Gemini response."""
+    """Extract text and/or function call from a Gemini response.
+
+    When the model emits BOTH text and a function_call in the same response,
+    the text is preserved as a [REASONING]...[/REASONING] preamble so the
+    downstream ReAct loop can project it into the llm_reasoning event for the
+    chat UI and orchestration log. Without this, native function calling
+    silently drops the model's pre-call reasoning.
+    """
     if not response.candidates:
         return "Error: No response candidates from Gemini."
 
@@ -956,23 +993,27 @@ def _extract_gemini_response(response) -> str:
         reason = candidate.finish_reason.name if candidate.finish_reason else "UNKNOWN"
         return f"Error: Empty Gemini response. Finish Reason: {reason}"
 
-    # Check for function calls first (native tool calling)
-    function_calls = []
+    # Walk parts in order, collecting text (reasoning) and function calls.
+    text_parts: list[str] = []
+    function_calls: list[dict] = []
     for p in candidate.content.parts:
         if p.function_call:
             fc = p.function_call
             args = dict(fc.args) if fc.args else {}
             function_calls.append({"tool": fc.name, "arguments": args})
+        elif p.text:
+            text_parts.append(p.text)
 
     if function_calls:
-        # Return the first function call (ReAct loop processes one at a time)
         if len(function_calls) > 1:
             names = [fc["tool"] for fc in function_calls]
             print(f"DEBUG: ⚠️ Gemini returned {len(function_calls)} function calls: {names}. Using first: {names[0]}")
-        return json.dumps(function_calls[0])
+        call_json = json.dumps(function_calls[0])
+        reasoning = "\n".join(t for t in text_parts if t and t.strip()).strip()
+        if reasoning:
+            return f"[REASONING]\n{reasoning}\n[/REASONING]\n{call_json}"
+        return call_json
 
-    # Collect text parts
-    text_parts = [p.text for p in candidate.content.parts if p.text]
     if text_parts:
         return "\n".join(text_parts)
 
@@ -1141,15 +1182,11 @@ async def call_grok(model, messages, system, api_key, tools=None, images=None):
             output_tokens = usage.get("completion_tokens", 0)
             choice = data["choices"][0]
             msg = choice.get("message", {})
+            text = _openai_compat_extract(msg)
             if msg.get("tool_calls"):
-                tc = msg["tool_calls"][0]
-                text = json.dumps({
-                    "tool": tc["function"]["name"],
-                    "arguments": json.loads(tc["function"].get("arguments", "{}"))
-                })
                 return text, input_tokens, output_tokens
             print(f"DEBUG: ✅ Grok call complete (attempt {attempt})", flush=True)
-            return msg.get("content", ""), input_tokens, output_tokens
+            return text, input_tokens, output_tokens
         except httpx.TimeoutException:
             last_error = f"Request timed out ({GROK_TIMEOUT}s)"
             print(f"DEBUG: ⏱️ Grok timeout on attempt {attempt}/{MAX_RETRIES}. Retrying in {backoff}s...", flush=True)
@@ -1233,15 +1270,11 @@ async def call_deepseek(model, messages, system, api_key, tools=None, images=Non
             output_tokens = usage.get("completion_tokens", 0)
             choice = data["choices"][0]
             msg = choice.get("message", {})
+            text = _openai_compat_extract(msg)
             if msg.get("tool_calls"):
-                tc = msg["tool_calls"][0]
-                text = json.dumps({
-                    "tool": tc["function"]["name"],
-                    "arguments": json.loads(tc["function"].get("arguments", "{}"))
-                })
                 return text, input_tokens, output_tokens
             print(f"DEBUG: ✅ DeepSeek call complete (attempt {attempt})", flush=True)
-            return msg.get("content", ""), input_tokens, output_tokens
+            return text, input_tokens, output_tokens
         except httpx.TimeoutException:
             last_error = f"Request timed out ({DEEPSEEK_TIMEOUT}s)"
             print(f"DEBUG: ⏱️ DeepSeek timeout on attempt {attempt}/{MAX_RETRIES}. Retrying in {backoff}s...", flush=True)
@@ -1346,15 +1379,11 @@ async def call_v1_compatible(model, messages, system, base_url, api_key, tools=N
             output_tokens = usage.get("completion_tokens", 0)
             choice = data["choices"][0]
             msg = choice.get("message", {})
+            text = _openai_compat_extract(msg)
             if msg.get("tool_calls"):
-                tc = msg["tool_calls"][0]
-                text = json.dumps({
-                    "tool": tc["function"]["name"],
-                    "arguments": json.loads(tc["function"].get("arguments", "{}"))
-                })
                 return text, input_tokens, output_tokens
             print(f"DEBUG: ✅ V1-compatible call complete (attempt {attempt})", flush=True)
-            return msg.get("content", ""), input_tokens, output_tokens
+            return text, input_tokens, output_tokens
         except httpx.TimeoutException:
             last_error = f"Request timed out ({V1_TIMEOUT}s)"
             print(f"DEBUG: ⏱️ V1-compatible timeout on attempt {attempt}/{MAX_RETRIES}. Retrying in {backoff}s...", flush=True)
@@ -1848,13 +1877,21 @@ async def generate_response(
 
                     # Check for native tool calls
                     if "tool_calls" in msg and msg["tool_calls"]:
-                        # Convert Ollama native tool call to our internal JSON format
+                        # Convert Ollama native tool call to our internal JSON format.
+                        # Preserve any text content the model emitted alongside the
+                        # call as a [REASONING] preamble (some Ollama models emit
+                        # both — qwen3, deepseek-r1 routinely do).
                         tc = msg["tool_calls"][0]
                         print(f"DEBUG: Native Tool Call received: {tc['function']['name']}", flush=True)
-                        result_text = json.dumps({
+                        call_json = json.dumps({
                             "tool": tc["function"]["name"],
                             "arguments": tc["function"]["arguments"]
                         })
+                        reasoning = (msg.get("content") or "").strip()
+                        if reasoning:
+                            result_text = f"[REASONING]\n{reasoning}\n[/REASONING]\n{call_json}"
+                        else:
+                            result_text = call_json
                     else:
                         result_text = msg.get("content", "")
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Bot, User, Settings, Terminal, Sun, Moon, Plus, ChevronDown, ChevronRight, Zap, GitBranch, CheckCircle2, AlertCircle, History, RefreshCw, Clock, Trash2, X, Paperclip, ImageIcon, Cpu, Wrench, Network, CalendarClock, Sparkles, Copy, Check} from 'lucide-react';
+import { Send, Bot, User, Settings, Terminal, Sun, Moon, Plus, ChevronDown, ChevronRight, Zap, GitBranch, CheckCircle2, AlertCircle, History, RefreshCw, Clock, Trash2, X, Paperclip, ImageIcon, Cpu, Wrench, Network, CalendarClock, Sparkles, Copy, Check, Brain} from 'lucide-react';
 
 import { useRouter } from 'next/navigation';
 import { CollectDataForm } from '@/components/CollectDataForm';
@@ -66,6 +66,41 @@ function ThoughtCollapsible({ thoughts, stepName }: { thoughts: string[]; stepNa
   );
 }
 
+// ─── LLM Reasoning Collapsible ──────────────────────────────────────────────
+// Renders private chain-of-thought extracted server-side from [REASONING]
+// blocks. One entry per turn, in chronological order.
+function ReasoningCollapsible({ reasoning, stepName }: { reasoning: string[]; stepName?: string }) {
+  const [open, setOpen] = useState(false);
+  const blocks = reasoning.map(r => r.trim()).filter(Boolean);
+  if (blocks.length === 0) return null;
+  return (
+    <div className="mt-2 border border-indigo-900/40 rounded-sm overflow-hidden w-0 min-w-full">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] font-mono text-indigo-300 hover:text-indigo-100 hover:bg-indigo-950/40 bg-indigo-950/20 transition-colors"
+      >
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <Brain className="h-3 w-3" />
+        <span className="uppercase tracking-wider">
+          Thinking {stepName ? `· ${stepName}` : ''} ({blocks.length} turn{blocks.length > 1 ? 's' : ''})
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-indigo-900/30 bg-indigo-950/10 divide-y divide-indigo-900/20">
+          {blocks.map((block, i) => (
+            <div key={i} className="px-3 py-2 text-[12px] font-mono italic leading-5">
+              {blocks.length > 1 && (
+                <span className="text-indigo-700 text-[10px] not-italic mr-2">Turn {i + 1}</span>
+              )}
+              <span className="text-indigo-300/80 whitespace-pre-wrap break-words">{block}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Orchestration Step Divider ──────────────────────────────────────────────
 function StepDivider({ stepName, stepType }: { stepName: string; stepType?: string }) {
   const typeIcon: Record<string, string> = {
@@ -121,6 +156,9 @@ function AgentStepResult({ msg, onCollectDataSubmit }: {
             {msg.stepName}
           </div>
         )}
+        {msg.reasoning && msg.reasoning.length > 0 && (
+          <ReasoningCollapsible reasoning={msg.reasoning} stepName={msg.stepName} />
+        )}
         <div className="p-3 text-[14px] leading-7 border border-purple-900/30 bg-purple-950/10 relative font-sans rounded-sm group">
           <div className="prose prose-invert max-w-none text-zinc-200 font-normal">
             {renderTextContent(displayContent)}
@@ -153,6 +191,9 @@ function AssistantBubble({ msg, agentName }: { msg: Message; agentName: string }
   const [copied, setCopied] = useState(false);
   return (
     <div className="flex flex-col self-start min-w-72 max-w-full gap-2">
+      {msg.reasoning && msg.reasoning.length > 0 && (
+        <ReasoningCollapsible reasoning={msg.reasoning} />
+      )}
       <div className={cn(
         "text-[15px] leading-7 border relative font-sans px-4 pb-4 bg-zinc-900/50 border-zinc-800 text-zinc-100 w-full group",
         msg.intent ? "pt-6" : "pt-4"
@@ -455,6 +496,7 @@ export default function Home() {
 
   // Accumulate LLM thoughts per active step during streaming
   const pendingThoughtsRef = useRef<string[]>([]);
+  const pendingReasoningRef = useRef<string[]>([]);
   // SSE abort controller — cancelled on new chat, unmount, or confirmed Settings navigation
   const sseAbortRef = useRef<AbortController | null>(null);
   // Persists across SSE calls: true once orchestration_complete is received
@@ -707,6 +749,7 @@ export default function Home() {
     setStreamingActivity(null);
     setIsThinking(false);
     pendingThoughtsRef.current = [];
+    pendingReasoningRef.current = [];
 
     // Try SSE streaming first
     try {
@@ -720,6 +763,7 @@ export default function Home() {
       setStreamingActivity(null);
       setIsThinking(false);
       pendingThoughtsRef.current = [];
+      pendingReasoningRef.current = [];
       // Reset session after orchestration so next query starts fresh (no sub-agent history)
       if (orchestrationCompletedRef.current) {
         orchestrationCompletedRef.current = false;
@@ -734,7 +778,7 @@ export default function Home() {
   const handleSSEEvent = (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     data: Record<string, any>,
-    stepState: { thoughts: string[]; orchStepId: string | null; orchCompleted: boolean; receivedAgentStep: boolean }
+    stepState: { thoughts: string[]; reasoning: string[]; orchStepId: string | null; orchCompleted: boolean; receivedAgentStep: boolean }
   ): { done: boolean; error?: Error } => {
     switch (data.type) {
 
@@ -769,10 +813,27 @@ export default function Home() {
         break;
       }
 
+      case 'llm_reasoning':
+        // Private chain-of-thought from a [REASONING] block. Accumulates per
+        // turn; rendered as the "Thinking" panel above the assistant bubble.
+        if (data.orch_step_id) {
+          if (data.orch_step_id !== stepState.orchStepId) {
+            stepState.thoughts = [];
+            stepState.reasoning = [];
+            stepState.orchStepId = data.orch_step_id as string;
+          }
+          stepState.reasoning = [...stepState.reasoning, data.reasoning as string];
+        } else {
+          pendingReasoningRef.current = [...pendingReasoningRef.current, data.reasoning as string];
+        }
+        setIsThinking(true);
+        break;
+
       case 'llm_thought':
         if (data.orch_step_id) {
           if (data.orch_step_id !== stepState.orchStepId) {
             stepState.thoughts = [];
+            stepState.reasoning = [];
             stepState.orchStepId = data.orch_step_id as string;
           }
           stepState.thoughts = [...stepState.thoughts, data.thought as string];
@@ -784,6 +845,7 @@ export default function Home() {
 
       case 'response': {
         const capturedThoughts = [...pendingThoughtsRef.current];
+        const capturedReasoning = [...pendingReasoningRef.current];
         setMessages(prev => [...prev, {
           role: 'assistant',
           content: data.content as string,
@@ -791,8 +853,10 @@ export default function Home() {
           data: data.data,
           tool: data.tool_name,
           thoughts: capturedThoughts,
+          reasoning: capturedReasoning,
         }]);
         pendingThoughtsRef.current = [];
+        pendingReasoningRef.current = [];
         break;
       }
 
@@ -801,6 +865,7 @@ export default function Home() {
         if (data.orch_step_id) {
           // Sub-agent step inside an orchestration — render as agent_step_result bubble
           const capturedThoughts = [...stepState.thoughts];
+          const capturedReasoning = [...stepState.reasoning];
           setMessages(prev => [...prev, {
             role: 'assistant',
             content: data.response as string,
@@ -811,12 +876,15 @@ export default function Home() {
             stepName: data.step_name,
             orchStepId: data.orch_step_id,
             thoughts: capturedThoughts,
+            reasoning: capturedReasoning,
           }]);
           stepState.thoughts = [];
+          stepState.reasoning = [];
           stepState.receivedAgentStep = true;
         } else {
           // Top-level final (single-agent response outside orchestration)
           const capturedThoughts = [...pendingThoughtsRef.current];
+          const capturedReasoning = [...pendingReasoningRef.current];
           setMessages(prev => [...prev, {
             role: 'assistant',
             content: data.response as string,
@@ -824,8 +892,10 @@ export default function Home() {
             data: data.data,
             tool: data.tool_name,
             thoughts: capturedThoughts,
+            reasoning: capturedReasoning,
           }]);
           pendingThoughtsRef.current = [];
+          pendingReasoningRef.current = [];
         }
         break;
       }
@@ -842,6 +912,7 @@ export default function Home() {
 
       case 'step_start':
         stepState.thoughts = [];
+        stepState.reasoning = [];
         stepState.orchStepId = data.orch_step_id as string;
         setStreamingActivity(`▶ ${(data.step_name as string) || 'Step'}`);
         setMessages(prev => [...prev, {
@@ -866,8 +937,10 @@ export default function Home() {
           stepName: data.step_name,
           orchStepId: data.orch_step_id,
           thoughts: [...stepState.thoughts],
+          reasoning: [...stepState.reasoning],
         }]);
         stepState.thoughts = [];
+        stepState.reasoning = [];
         break;
 
       case 'step_complete':
@@ -965,7 +1038,7 @@ export default function Home() {
   // SSE Streaming implementation
   const processMessageSSE = async (content: string, images?: string[]) => {
     return new Promise<void>((resolve, reject) => {
-      const stepState = { thoughts: [] as string[], orchStepId: null as string | null, orchCompleted: false, receivedAgentStep: false };
+      const stepState = { thoughts: [] as string[], reasoning: [] as string[], orchStepId: null as string | null, orchCompleted: false, receivedAgentStep: false };
 
       const controller = new AbortController();
       sseAbortRef.current = controller;
@@ -1056,6 +1129,7 @@ export default function Home() {
     setStreamingActivity('Resuming orchestration...');
     setIsThinking(false);
     pendingThoughtsRef.current = [];
+    pendingReasoningRef.current = [];
 
     try {
       const response = await fetch(`/api/orchestrations/runs/${runId}/human-input`, {
@@ -1070,7 +1144,7 @@ export default function Home() {
       if (!reader) throw new Error('No reader available');
 
       const decoder = new TextDecoder();
-      const stepState = { thoughts: [] as string[], orchStepId: null as string | null, orchCompleted: false, receivedAgentStep: false };
+      const stepState = { thoughts: [] as string[], reasoning: [] as string[], orchStepId: null as string | null, orchCompleted: false, receivedAgentStep: false };
       let buffer = '';
 
       while (true) {
@@ -1101,6 +1175,7 @@ export default function Home() {
       setStreamingActivity(null);
       setIsThinking(false);
       pendingThoughtsRef.current = [];
+      pendingReasoningRef.current = [];
     }
   };
 
