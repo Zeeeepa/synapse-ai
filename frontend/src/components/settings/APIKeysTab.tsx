@@ -228,6 +228,8 @@ const V2Docs = ({ BASE }: { BASE: string }) => (
                 <EndpointRow method="GET"  path="/chat/{session_id}/status"             desc="Poll chat session status and message history"          />
                 <EndpointRow method="GET"  path="/agents"                               desc="List all agent definitions from Postgres"               />
                 <EndpointRow method="GET"  path="/agents/{agent_id}"                    desc="Get a single agent definition"                         />
+                <EndpointRow method="GET"  path="/orchestrations/runs/{run_id}/events" desc="Full event history for a run (Redis Stream replay)"     badge="new" />
+                <EndpointRow method="GET"  path="/chat/{session_id}/events"            desc="Full event history for a chat session (Redis Stream)"   badge="new" />
                 <EndpointRow method="GET"  path="/workers"                              desc="List registered workers and their health status"        />
                 <EndpointRow method="GET"  path="/queue/stats"                          desc="Current queue depth and active job count"               />
                 <EndpointRow method="GET"  path="/metrics"                              desc="Prometheus metrics endpoint"                            />
@@ -270,7 +272,7 @@ const V2Docs = ({ BASE }: { BASE: string }) => (
 
         <Section title="Stream Run Events (SSE)" defaultOpen>
             <p className="text-xs text-zinc-600">
-                Subscribe to real-time step events. The stream closes automatically after <code className="text-zinc-400">{`{"type":"done"}`}</code>. Pass <code className="text-zinc-400">Last-Event-ID</code> to replay missed events on reconnect.
+                Subscribe to real-time step events. The stream stays open until <code className="text-zinc-400">{`{"type":"done"}`}</code> (run complete). If the run hits a Human Step it emits <code className="text-zinc-400">{`{"type":"paused"}`}</code> — the stream <strong className="text-zinc-400">stays open</strong> and resumes automatically after human input is submitted. Pass <code className="text-zinc-400">Last-Event-ID</code> to replay missed events on reconnect.
             </p>
             <CodeBlock code={`# Connect to the stream
 curl -N "${BASE}/orchestrations/runs/RUN_ID/stream" \\
@@ -289,11 +291,30 @@ curl -N "${BASE}/orchestrations/runs/RUN_ID/stream" \\
 # id: 1780499758250-0
 # data: {"type": "step_complete", "orch_step_id": "step_research", "duration_seconds": 8.02}
 #
-# id: 1780499758251-0
+# ── Human Step: stream stays open, waiting for /resume ──────────────────
+# id: 1780499758260-0
+# data: {"type": "human_input_required", "orch_step_id": "step_approve", "prompt": "Approve?", "fields": ["decision"]}
+#
+# id: 1780499758261-0
+# data: {"type": "paused"}      ← stream stays open, do NOT close
+#
+# ── After POST /resume — worker picks up and continues ──────────────────
+# id: 1780499770100-0
+# data: {"type": "worker_picked_up", "worker_id": "worker-prod-01"}
+#
+# id: 1780499775200-0
 # data: {"type": "orchestration_complete", "status": "completed", "final_state": {...}}
 #
-# id: 1780499758258-0
-# data: {"type": "done"}`} />
+# id: 1780499775210-0
+# data: {"type": "done"}        ← close the stream here`} />
+            <div className="space-y-1">
+                <label className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Sentinel event types</label>
+                <div className="text-xs font-mono space-y-1 text-zinc-500">
+                    <div><span className="text-zinc-300">{`{"type":"done"}`}</span>            <span className="ml-2 text-zinc-700">Run finished — close the connection</span></div>
+                    <div><span className="text-zinc-300">{`{"type":"paused"}`}</span>          <span className="ml-2 text-zinc-700">Human step hit — keep connection open, more events after /resume</span></div>
+                    <div><span className="text-zinc-300">{`{"type":"stream_complete"}`}</span> <span className="ml-2 text-zinc-700">Late reconnect after done — server closes gracefully, no new events</span></div>
+                </div>
+            </div>
             <div className="space-y-1">
                 <label className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Reconnect — replay missed events</label>
                 <CodeBlock code={`# Pass the last seen id: value to receive only missed events
@@ -301,7 +322,57 @@ curl -N "${BASE}/orchestrations/runs/RUN_ID/stream" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Last-Event-ID: 1780499750229-0"
 
-# Only events after that ID are returned, ending with {"type":"done"}`} />
+# All events after 1780499750229-0 are returned, including paused and done.
+# Events are stored in Redis for 1 hour — replay works across disconnects.`} />
+            </div>
+        </Section>
+
+        <Section title="Get Event History">
+            <p className="text-xs text-zinc-600">
+                Retrieve the complete event log for a run or chat session as JSON. Useful for auditing, late subscribers, or building a replay UI. Events are stored in Redis Streams (1 hr TTL, up to 10 000 events per run).
+            </p>
+            <div className="space-y-1">
+                <label className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">GET /orchestrations/runs/{'{run_id}'}/events — full run history</label>
+                <CodeBlock code={`curl -s "${BASE}/orchestrations/runs/RUN_ID/events" \\
+  -H "Authorization: Bearer YOUR_API_KEY"
+
+# {
+#   "run_id": "run_2483e1773407_1780499750067",
+#   "count": 42,
+#   "events": [
+#     { "id": "1780499750127-0", "event": {"type": "worker_picked_up", ...} },
+#     { "id": "1780499750218-0", "event": {"type": "step_start", ...} },
+#     ...
+#     { "id": "1780499775210-0", "event": {"type": "done"} }
+#   ]
+# }
+
+# Paginate using Redis Stream IDs:
+curl -s "${BASE}/orchestrations/runs/RUN_ID/events?start=1780499750218-0&end=+" \\
+  -H "Authorization: Bearer YOUR_API_KEY"`} />
+            </div>
+            <div className="space-y-1">
+                <label className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">GET /chat/{'{session_id}'}/events — full chat history</label>
+                <CodeBlock code={`curl -s "${BASE}/chat/sess_b639c740430d4a9a/events" \\
+  -H "Authorization: Bearer YOUR_API_KEY"
+
+# {
+#   "session_id": "sess_b639c740430d4a9a",
+#   "count": 18,
+#   "events": [
+#     { "id": "1780499760100-0", "event": {"type": "thinking", ...} },
+#     { "id": "1780499760200-0", "event": {"type": "tool_execution", ...} },
+#     { "id": "1780499762000-0", "event": {"type": "final", "response": "..."} },
+#     { "id": "1780499762010-0", "event": {"type": "done"} }
+#   ]
+# }`} />
+            </div>
+            <div className="space-y-1">
+                <label className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Query params</label>
+                <div className="text-xs font-mono space-y-1 text-zinc-500">
+                    <div><span className="text-zinc-300">start</span> <span className="ml-2 text-zinc-700">Redis Stream ID — return events from this ID onwards (default <code className="text-zinc-500">-</code> = beginning)</span></div>
+                    <div><span className="text-zinc-300">end</span>   <span className="ml-2 text-zinc-700">Redis Stream ID — return events up to this ID (default <code className="text-zinc-500">+</code> = latest)</span></div>
+                </div>
             </div>
         </Section>
 
@@ -461,9 +532,13 @@ async def run_and_stream(orch_id: str, message: str):
                     print(f"  → {event['step_name']} ({event['step_type']})")
                 elif t == "tool_execution":
                     print(f"     tool: {event['tool_name']}")
+                elif t == "human_input_required":
+                    print(f"  ⏸ waiting for human input: {event.get('prompt')}")
+                elif t == "paused":
+                    print("  (stream stays open — submit /resume to continue)")
                 elif t == "orchestration_complete":
                     print(f"  ✓ {event['status']}")
-                elif t == "done":
+                elif t in ("done", "stream_complete"):
                     break
 
 asyncio.run(run_and_stream("ORCH_ID", "Analyse our top 10 customers"))`} />
@@ -500,7 +575,7 @@ async function* streamEvents(runId: string) {
       if (line.startsWith("data: ")) {
         const ev = JSON.parse(line.slice(6));
         yield ev;
-        if (ev.type === "done") return;
+        if (ev.type === "done" || ev.type === "stream_complete") return;
       }
     }
   }
@@ -532,7 +607,7 @@ function useOrchestrationRun(runId: string | null) {
     es.onmessage = (e) => {
       const event = JSON.parse(e.data);
       setEvents((prev) => [...prev, event]);
-      if (event.type === "done") { setStatus("done"); es.close(); }
+      if (event.type === "done" || event.type === "stream_complete") { setStatus("done"); es.close(); }
     };
     return () => es.close();
   }, [runId]);

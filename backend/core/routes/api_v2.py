@@ -366,6 +366,27 @@ async def v2_stream_run(
     )
 
 
+@router.get("/orchestrations/runs/{run_id}/events")
+async def v2_get_run_events(
+    run_id: str,
+    request: Request,
+    start: str = "-",
+    end: str = "+",
+    _: dict = Depends(require_api_key),
+):
+    """
+    Return all events stored in the Redis Stream for a run.
+    Use `start` / `end` query params (Redis Stream IDs) to paginate.
+    Pass `start="-"` and `end="+"` (defaults) to retrieve the full history.
+    """
+    redis = _require_scale_mode(request)
+
+    from core.scale.event_bridge import get_run_events
+
+    events = await get_run_events(redis, run_id, start=start, end=end)
+    return {"run_id": run_id, "count": len(events), "events": events}
+
+
 @router.post("/orchestrations/runs/{run_id}/cancel")
 async def v2_cancel_run(
     run_id: str,
@@ -587,6 +608,26 @@ async def v2_chat_status(
         "last_message_at": str(row.last_message_at) if row.last_message_at else None,
         "worker_id": row.worker_id,
     }
+
+
+@router.get("/chat/{session_id}/events")
+async def v2_get_chat_events(
+    session_id: str,
+    request: Request,
+    start: str = "-",
+    end: str = "+",
+    _: dict = Depends(require_api_key),
+):
+    """
+    Return all events stored in the Redis Stream for a chat session.
+    Use `start` / `end` query params (Redis Stream IDs) to paginate.
+    """
+    redis = _require_scale_mode(request)
+
+    from core.scale.event_bridge import get_chat_events
+
+    events = await get_chat_events(redis, session_id, start=start, end=end)
+    return {"session_id": session_id, "count": len(events), "events": events}
 
 
 @router.post("/chat/{session_id}/cancel")

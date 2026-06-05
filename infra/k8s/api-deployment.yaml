@@ -16,7 +16,8 @@ spec:
     spec:
       containers:
         - name: api
-          image: synapse-backend:latest
+          image: synapseorchai/synapse-ai-api-server:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8765
           env:

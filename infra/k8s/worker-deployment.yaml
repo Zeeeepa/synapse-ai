@@ -17,7 +17,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: worker
-          image: synapse-worker:latest
+          image: synapseorchai/synapse-ai-worker:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 9000

@@ -21,10 +21,40 @@ COPY backend/worker_main.py .
 
 ENV PYTHONPATH=/app/backend
 ENV SYNAPSE_DATA_DIR=/data
+
+# Core connection URLs (required for scale mode)
+ENV REDIS_URL=""
+ENV SCALE_POSTGRES_URL=""
+
+# Worker tuning
 ENV WORKER_HEALTH_PORT=9000
 ENV WORKER_CONCURRENCY=10
 ENV WORKER_JOB_TIMEOUT=3600
 ENV WORKER_MAX_RETRIES=3
+ENV WORKER_QUEUE_SHARD=default
+ENV NUM_QUEUE_SHARDS=1
+
+# Multi-tenancy
+ENV DEFAULT_TENANT_ID=default
+ENV ENABLE_TENANT_ISOLATION=0
+
+# Database
+ENV PGBOUNCER_MODE=0
+
+# S3 storage (vault + execution logs)
+ENV S3_BUCKET=""
+ENV S3_REGION=us-east-1
+ENV S3_PREFIX=synapse
+ENV S3_ACCESS_KEY_ID=""
+ENV S3_SECRET_ACCESS_KEY=""
+ENV S3_ENDPOINT_URL=""
+
+# Observability
+ENV OTLP_ENDPOINT=""
+ENV METRICS_TOKEN=""
+
+# Kubernetes mode
+ENV K8S_MODE=0
 
 EXPOSE 9000
 

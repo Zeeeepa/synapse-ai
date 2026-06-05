@@ -512,3 +512,190 @@ async def delete_tenant(tenant_id: str, request: Request):
         await session.commit()
 
     return {"status": "deleted", "tenant_id": tenant_id}
+
+
+# ---------------------------------------------------------------------------
+# Analytics & Run Dashboard
+# ---------------------------------------------------------------------------
+
+@router.get("/scale/analytics")
+async def scale_analytics(request: Request):
+    """Aggregated run analytics for the scale dashboard."""
+    session_factory = getattr(request.app.state, "pg_session_factory", None)
+    if not session_factory:
+        return {"available": False}
+
+    try:
+        from sqlalchemy import select, func
+        from core.scale.models_db import OrchestrationRunDB, WorkerDB
+        from datetime import datetime
+
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        async with session_factory() as session:
+            # Status breakdown
+            r = await session.execute(
+                select(OrchestrationRunDB.status, func.count().label("cnt"))
+                .group_by(OrchestrationRunDB.status)
+            )
+            status_counts: dict = {row.status: row.cnt for row in r.all()}
+            total_runs = sum(status_counts.values())
+            completed = status_counts.get("completed", 0)
+            success_rate = round(completed / total_runs * 100, 1) if total_runs else 0.0
+
+            # Runs today
+            r = await session.execute(
+                select(func.count()).select_from(OrchestrationRunDB).where(
+                    OrchestrationRunDB.created_at >= today_start
+                )
+            )
+            runs_today = r.scalar() or 0
+
+            # Avg cost (all time, non-null)
+            r = await session.execute(
+                select(func.avg(OrchestrationRunDB.total_cost_usd)).where(
+                    OrchestrationRunDB.total_cost_usd.isnot(None)
+                )
+            )
+            avg_cost_usd = round(float(r.scalar() or 0), 6)
+
+            # Cost today
+            r = await session.execute(
+                select(func.sum(OrchestrationRunDB.total_cost_usd)).where(
+                    OrchestrationRunDB.created_at >= today_start,
+                    OrchestrationRunDB.total_cost_usd.isnot(None),
+                )
+            )
+            total_cost_usd_today = round(float(r.scalar() or 0), 6)
+
+            # Avg duration for completed runs (seconds)
+            r = await session.execute(
+                select(
+                    func.avg(
+                        func.extract("epoch", OrchestrationRunDB.ended_at)
+                        - func.extract("epoch", OrchestrationRunDB.started_at)
+                    )
+                ).where(
+                    OrchestrationRunDB.status == "completed",
+                    OrchestrationRunDB.ended_at.isnot(None),
+                    OrchestrationRunDB.started_at.isnot(None),
+                )
+            )
+            avg_duration_seconds = round(float(r.scalar() or 0), 1)
+
+            # Cache hit rate: cache_read_tokens / total_tokens_used
+            r = await session.execute(
+                select(
+                    func.sum(OrchestrationRunDB.cache_read_tokens).label("cache_reads"),
+                    func.sum(OrchestrationRunDB.total_tokens_used).label("total_tokens"),
+                ).where(OrchestrationRunDB.total_tokens_used.isnot(None))
+            )
+            row = r.one()
+            cache_reads = int(row.cache_reads or 0)
+            total_tokens = int(row.total_tokens or 0)
+            cache_hit_rate = round(cache_reads / total_tokens * 100, 1) if total_tokens else 0.0
+
+            # Workers online
+            r = await session.execute(
+                select(func.count()).select_from(WorkerDB).where(WorkerDB.status == "online")
+            )
+            workers_online = r.scalar() or 0
+
+        return {
+            "available": True,
+            "total_runs": total_runs,
+            "runs_today": runs_today,
+            "status_counts": status_counts,
+            "success_rate": success_rate,
+            "avg_cost_usd": avg_cost_usd,
+            "total_cost_usd_today": total_cost_usd_today,
+            "avg_duration_seconds": avg_duration_seconds,
+            "cache_hit_rate": cache_hit_rate,
+            "workers_online": workers_online,
+        }
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+
+@router.get("/scale/runs")
+async def list_scale_runs(request: Request, limit: int = 20, session_id: str = None):
+    """List recent orchestration runs from Postgres for the scale dashboard."""
+    session_factory = getattr(request.app.state, "pg_session_factory", None)
+    if not session_factory:
+        return []
+
+    try:
+        from sqlalchemy import select
+        from core.scale.models_db import OrchestrationRunDB
+
+        async with session_factory() as session:
+            q = (
+                select(OrchestrationRunDB)
+                .order_by(OrchestrationRunDB.created_at.desc())
+                .limit(min(limit, 100))
+            )
+            if session_id:
+                q = q.where(OrchestrationRunDB.session_id == session_id)
+            result = await session.execute(q)
+            rows = result.scalars().all()
+
+        return [
+            {
+                "run_id": r.run_id,
+                "orchestration_id": r.orchestration_id,
+                "session_id": r.session_id,
+                "tenant_id": r.tenant_id,
+                "status": r.status,
+                "started_at": str(r.started_at) if r.started_at else None,
+                "ended_at": str(r.ended_at) if r.ended_at else None,
+                "total_cost_usd": r.total_cost_usd,
+                "total_tokens_used": r.total_tokens_used,
+                "worker_id": r.worker_id,
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+@router.get("/scale/runs/{run_id}")
+async def get_scale_run(run_id: str, request: Request):
+    """Fetch a single orchestration run by run_id (for the search feature)."""
+    session_factory = getattr(request.app.state, "pg_session_factory", None)
+    if not session_factory:
+        raise HTTPException(503, detail="Postgres not configured")
+
+    try:
+        from sqlalchemy import select
+        from core.scale.models_db import OrchestrationRunDB
+
+        async with session_factory() as session:
+            result = await session.execute(
+                select(OrchestrationRunDB).where(OrchestrationRunDB.run_id == run_id)
+            )
+            row = result.scalar_one_or_none()
+
+        if not row:
+            raise HTTPException(404, detail=f"Run '{run_id}' not found")
+
+        return {
+            "run_id": row.run_id,
+            "orchestration_id": row.orchestration_id,
+            "session_id": row.session_id,
+            "tenant_id": row.tenant_id,
+            "status": row.status,
+            "started_at": str(row.started_at) if row.started_at else None,
+            "ended_at": str(row.ended_at) if row.ended_at else None,
+            "total_cost_usd": row.total_cost_usd,
+            "total_tokens_used": row.total_tokens_used,
+            "worker_id": row.worker_id,
+            "current_step_id": row.current_step_id,
+            "waiting_for_human": row.waiting_for_human,
+            "human_prompt": row.human_prompt,
+            "cache_hit_count": row.cache_hit_count,
+            "estimated_savings_usd": row.estimated_savings_usd,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))

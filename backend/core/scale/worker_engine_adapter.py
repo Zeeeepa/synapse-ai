@@ -68,7 +68,7 @@ class WorkerEngineAdapter:
             # The run is checkpointed; a resume job will pick it up.
             if event.get("type") == "human_input_required":
                 await self._sync_paused_state(event)
-                await self._publisher.publish_done()
+                await self._publisher.publish_paused()
                 return "paused"
 
         # Sync final run state from the in-memory engine state back to Postgres
@@ -121,7 +121,7 @@ class WorkerEngineAdapter:
                     final_status = event.get("status", "completed")
                 if event.get("type") == "human_input_required":
                     await self._sync_paused_state(event)
-                    await self._publisher.publish_done()
+                    await self._publisher.publish_paused()
                     return "paused"
             await self._sync_final_state(final_status)
             await self._publisher.publish_done()
@@ -162,7 +162,7 @@ class WorkerEngineAdapter:
             if event.get("type") == "human_input_required":
                 print(f"[adapter.resume] ⏸ another human step — pausing again", flush=True)
                 await self._sync_paused_state(event)
-                await self._publisher.publish_done()
+                await self._publisher.publish_paused()
                 return "paused"
 
         print(f"[adapter.resume] ✅ loop done after {event_count} events, calling _sync_final_state(status={final_status})", flush=True)
@@ -185,7 +185,7 @@ class WorkerEngineAdapter:
                 final_status = event.get("status", "completed")
 
             if event.get("type") == "human_input_required":
-                await self._publisher.publish_done()
+                await self._publisher.publish_paused()
                 return "paused"
 
         await self._sync_final_state(final_status)

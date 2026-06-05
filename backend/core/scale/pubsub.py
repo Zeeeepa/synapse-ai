@@ -63,6 +63,11 @@ class RunEventPublisher:
         """Publish a sentinel 'done' event so subscribers know the stream ended."""
         await self.publish({"type": "done"})
 
+    async def publish_paused(self) -> None:
+        """Publish a 'paused' sentinel — run is waiting for human input.
+        Unlike 'done', this does NOT close the SSE stream on the client side."""
+        await self.publish({"type": "paused"})
+
 
 # ---------------------------------------------------------------------------
 # Chat session event publisher
@@ -91,6 +96,10 @@ class ChatEventPublisher:
 
     async def publish_done(self) -> None:
         await self.publish({"type": "done"})
+
+    async def publish_paused(self) -> None:
+        """Publish a 'paused' sentinel — session is waiting for human input."""
+        await self.publish({"type": "paused"})
 
 
 # ---------------------------------------------------------------------------
