@@ -529,8 +529,13 @@ async def run_agent_step(
     if max_turns is None:
         max_turns = MAX_TURNS
 
-    # Resolve agent
-    active_agent = agent_override if agent_override is not None else _resolve_agent_by_id(agent_id)
+    # Resolve agent — Postgres first (worker mode), JSON fallback
+    if agent_override is not None:
+        active_agent = agent_override
+    else:
+        from core.scale.context import resolve_agent as _ctx_resolve_agent
+        resolved = await _ctx_resolve_agent(agent_id) if agent_id else None
+        active_agent = resolved if resolved is not None else _resolve_agent_by_id(agent_id)
     agent_id_for_session = active_agent.get("id", agent_id or "unknown")
 
     # Build system prompt with repo and DB context injection
@@ -564,7 +569,8 @@ async def run_agent_step(
         tools_json = json.dumps(tools_override)
         print(f"DEBUG RUN_AGENT: start agent_id={agent_id_for_session}, tools_override={len(tools_override)} tools", flush=True)
     else:
-        custom_tools = load_custom_tools()
+        from core.scale.context import resolve_custom_tools as _ctx_resolve_tools
+        custom_tools = await _ctx_resolve_tools()
         print(f"DEBUG RUN_AGENT: start agent_id={agent_id_for_session}, sessions={list(server_module.agent_sessions.keys())}", flush=True)
         all_tools, tool_schema_map, ollama_tools, tools_json = await aggregate_all_tools(
             server_module.agent_sessions, active_agent, custom_tools
@@ -1073,7 +1079,8 @@ async def run_agent_step(
                 # ===== CUSTOM TOOLS (Webhook + Python) =====
 
                 if tool_name not in server_module.tool_router:
-                    custom_tools_list = load_custom_tools()
+                    from core.scale.context import resolve_custom_tools as _ctx_resolve_tools2
+                    custom_tools_list = await _ctx_resolve_tools2()
                     target_tool = next((t for t in custom_tools_list if t["name"] == tool_name), None)
 
                     if target_tool:
@@ -1479,8 +1486,10 @@ async def run_react_loop(request, server_module):
 
     yield {"type": "status", "message": "Processing your request..."}
 
-    # Resolve active agent
-    active_agent = _resolve_agent_by_id(request.agent_id)
+    # Resolve active agent — Postgres first (worker mode), JSON fallback
+    from core.scale.context import resolve_agent as _ctx_resolve_agent
+    _resolved = await _ctx_resolve_agent(request.agent_id) if request.agent_id else None
+    active_agent = _resolved if _resolved is not None else _resolve_agent_by_id(request.agent_id)
 
     # --- Orchestrator delegation ---
     if active_agent.get("type") == "orchestrator":
@@ -1537,3 +1546,4 @@ async def run_react_loop(request, server_module):
         raise
     finally:
         _agent_log.run_end(_log_status)
+        _agent_log.close()

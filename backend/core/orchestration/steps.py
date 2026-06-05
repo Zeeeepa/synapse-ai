@@ -45,7 +45,7 @@ class AgentStepExecutor:
     ) -> AsyncGenerator[dict, None]:
         from core.react_engine import run_agent_step
         from core.agent_logger import AgentLogger
-        from core.routes.agents import load_user_agents
+        from core.scale.context import resolve_agent
         print(f"DEBUG AGENT EXEC: agent_id={step.agent_id} step={step.id}", flush=True)
 
         from .context import build_origin_aware_context, snapshot_inputs
@@ -64,9 +64,7 @@ class AgentStepExecutor:
                "system_prompt_prefix": system_prompt_prefix}
 
         # ── Orchestrator-as-agent: delegate to a nested OrchestrationEngine ──
-        target_agent = next(
-            (a for a in load_user_agents() if a.get("id") == step.agent_id), None
-        )
+        target_agent = await resolve_agent(step.agent_id) if step.agent_id else None
         if target_agent and target_agent.get("type") == "orchestrator":
             async for ev in self._execute_nested_orchestration(
                 step, run, engine, transition, target_agent, prompt, inputs_snapshot
@@ -115,6 +113,7 @@ class AgentStepExecutor:
             raise
         finally:
             agent_log.run_end(_log_status)
+            agent_log.close()
 
         if final_response is None:
             raise RuntimeError(f"Agent step '{step.name}' ended without producing a final response")
@@ -277,7 +276,7 @@ class ToolStepExecutor:
         from core.config import load_settings
         from core.react_engine import parse_tool_call
         from core.tools import aggregate_all_tools
-        from core.routes.agents import load_user_agents
+        from core.scale.context import resolve_agent, resolve_custom_tools
 
         if not step.forced_tool:
             yield {"type": "step_warning", "orch_step_id": step.id,
@@ -302,9 +301,8 @@ class ToolStepExecutor:
         mode = detect_mode_from_model(model)
 
         # Load only the forced tool's schema — aggregate all tools then filter to one
-        agents = load_user_agents()
-        active_agent = next((a for a in agents if a.get("id") == step.agent_id), agents[0] if agents else {})
-        custom_tools = self._load_custom_tools()
+        active_agent = (await resolve_agent(step.agent_id) if step.agent_id else None) or {}
+        custom_tools = await resolve_custom_tools()
         all_tools, _, _, _ = await aggregate_all_tools(
             engine.server_module.agent_sessions, active_agent, custom_tools
         )
@@ -609,10 +607,10 @@ class ToolStepExecutor:
         except Exception:
             return resp.text or json.dumps({"error": f"Empty response (Status: {resp.status_code})"})
 
-    def _load_custom_tools(self) -> list:
+    async def _load_custom_tools(self) -> list:
         try:
-            from core.routes.tools import load_custom_tools
-            return load_custom_tools()
+            from core.scale.context import resolve_custom_tools
+            return await resolve_custom_tools()
         except Exception:
             return []
 

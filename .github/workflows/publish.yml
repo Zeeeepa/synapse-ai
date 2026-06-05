@@ -105,3 +105,27 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/synapse-ai:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.worker
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/synapse-ai-worker:${{ steps.version.outputs.VERSION }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/synapse-ai-worker:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push API server image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/synapse-ai-api-server:${{ steps.version.outputs.VERSION }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/synapse-ai-api-server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
