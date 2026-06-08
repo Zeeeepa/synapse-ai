@@ -262,8 +262,11 @@ def _make_aws_client(service_name: str, region: str, settings: dict):
 _CLI_COMMANDS: dict[str, list[str]] = {
     "cli.claude":   ["claude", "-p", "--allowedTools", ""],
     "cli.gemini":   ["gemini", "--prompt", ""],
+    # `instructions` (codex's system-prompt slot) is set per-call in
+    # call_cli_provider — never left empty, since some accounts reject an empty
+    # value with 400 "Instructions are required".
     "cli.codex":    ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox",
-                     "-c", "instructions=", "-c", "features.shell_tool=false"],
+                     "-c", "features.shell_tool=false"],
     "cli.copilot":  ["copilot", "-p"],
 }
 
@@ -458,6 +461,15 @@ async def call_cli_provider(
                 # stdin carries only the content after the sys_prompt (tools + messages).
                 prefix = sys_prompt.strip()
                 stdin_payload = full_prompt[len(prefix):].lstrip("\n") if full_prompt.startswith(prefix) else full_prompt
+
+            elif base_cli == "cli.codex":
+                # Codex's `instructions` config is its system-prompt slot and must be
+                # non-empty — an empty value 400s with "Instructions are required" on
+                # some accounts. The agent's real (ReAct) system prompt continues to
+                # ride in stdin via full_prompt, exactly as before; this just
+                # satisfies the API with a neutral non-empty value.
+                cmd.extend(["-c", "instructions=You are a helpful assistant."])
+                stdin_payload = full_prompt
 
             else:
                 stdin_payload = full_prompt
