@@ -167,6 +167,7 @@ _LLM_SETTING_KEYS = [
     "local_compatible_base_url", "local_compatible_key", "local_compatible_models",
     "openai_compatible_embed_models", "local_compatible_embed_models",
     "huggingface_token", "huggingface_models", "huggingface_max_new_tokens",
+    "anthropic_cli_models", "gemini_cli_models", "codex_cli_models", "github_copilot_cli_models",
     "bedrock_api_key", "bedrock_inference_profile",
     "aws_access_key_id", "aws_secret_access_key", "aws_session_token", "aws_region",
     "embedding_model",

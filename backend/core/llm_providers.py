@@ -347,11 +347,16 @@ async def call_cli_provider(
     AUTH_PATTERNS = ["login", "authenticate", "auth", "expired", "sign in", "api key", "unauthorized"]
     RATE_LIMIT_PATTERNS = ["429", "rate limit", "ratelimit", "quota", "too many requests", "capacity", "resource_exhausted", "ratelimitexceeded"]
 
-    parts = cli_model.lower().split(".")
+    # Split into base ("cli.<provider>") + variant, preserving dots in the
+    # variant (e.g. "cli.codex.gpt-5.4" → variant "gpt-5.4"). The base is matched
+    # case-insensitively; the variant is kept verbatim since model names can be
+    # case-sensitive and are passed straight through to the CLI's -m/--model flag.
+    parts = cli_model.split(".", 2)
     if len(parts) >= 2:
-        base_cli = f"{parts[0]}.{parts[1]}"
+        base_cli = f"{parts[0]}.{parts[1]}".lower()
     else:
         base_cli = cli_model.lower()
+    variant = parts[2] if len(parts) > 2 else None
 
     base_cmd = _CLI_COMMANDS.get(base_cli)
     if not base_cmd:
@@ -365,8 +370,7 @@ async def call_cli_provider(
         cmd.extend(["--resume", cli_session_id])
 
     # ── Dynamic Model & Options Parsing ──
-    if len(parts) > 2:
-        variant = parts[2]
+    if variant:
         if base_cli == "cli.claude":
             # Extract base model by removing any thinking suffixes
             clean_variant = variant.replace('-thinking', '').replace('-max', '').replace('-high', '')
@@ -577,10 +581,14 @@ async def call_cli_provider(
             )
 
         if not clean:
+            # Report the TAIL of stderr, not the head. CLIs like codex echo a
+            # startup banner (version/workdir/model) to the head of stderr and
+            # write the actual failure (e.g. an invalid_request_error for an
+            # unsupported model) at the tail — so [:200] would hide the real cause.
             raise LLMError(
                 f"CLI provider '{cli_model}' returned empty output. "
                 f"Return code: {process.returncode}. "
-                f"stderr: {stderr_text[:200]}"
+                f"stderr: {stderr_text[-600:]}"
             )
 
         print(f"DEBUG: ✅ CLI '{cli_model}' response ({len(clean)} chars)", flush=True)

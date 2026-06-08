@@ -79,6 +79,10 @@ interface ModelsTabProps {
     localCompatibleEmbedModels: string; setLocalCompatibleEmbedModels: (v: string) => void;
     huggingfaceToken: string; setHuggingfaceToken: (v: string) => void;
     huggingfaceModels: string; setHuggingfaceModels: (v: string) => void;
+    anthropicCliModels: string; setAnthropicCliModels: (v: string) => void;
+    geminiCliModels: string; setGeminiCliModels: (v: string) => void;
+    codexCliModels: string; setCodexCliModels: (v: string) => void;
+    githubCopilotCliModels: string; setGithubCopilotCliModels: (v: string) => void;
     // Backward compat
     mode: string; setMode: (v: string) => void;
     localModels: string[]; cloudModels: string[];
@@ -228,6 +232,10 @@ export const ModelsTab = ({
     localCompatibleEmbedModels, setLocalCompatibleEmbedModels,
     huggingfaceToken, setHuggingfaceToken,
     huggingfaceModels, setHuggingfaceModels,
+    anthropicCliModels, setAnthropicCliModels,
+    geminiCliModels, setGeminiCliModels,
+    codexCliModels, setCodexCliModels,
+    githubCopilotCliModels, setGithubCopilotCliModels,
 }: ModelsTabProps) => {
     const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
     const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
@@ -578,6 +586,24 @@ export const ModelsTab = ({
                                                         </a>
                                                     )}
                                                 </div>
+                                                {(() => {
+                                                    const cliCustom: Record<string, { value: string; set: (v: string) => void; placeholder: string; prefix: string }> = {
+                                                        anthropic_cli: { value: anthropicCliModels, set: setAnthropicCliModels, placeholder: 'e.g. claude-opus-4-5-20251101', prefix: 'cli.claude' },
+                                                        gemini_cli: { value: geminiCliModels, set: setGeminiCliModels, placeholder: 'e.g. gemini-2.5-pro', prefix: 'cli.gemini' },
+                                                        codex_cli: { value: codexCliModels, set: setCodexCliModels, placeholder: 'e.g. gpt-5.4, gpt-5.4-mini', prefix: 'cli.codex' },
+                                                        github_copilot_cli: { value: githubCopilotCliModels, set: setGithubCopilotCliModels, placeholder: 'e.g. claude-sonnet-4-5, gpt-4.1', prefix: 'cli.copilot' },
+                                                    };
+                                                    const cfg = cliCustom[key];
+                                                    if (!cfg) return null;
+                                                    return (
+                                                        <div className="space-y-1">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-500">Custom Model Names (comma-separated)</label>
+                                                            <input type="text" value={cfg.value} onChange={e => cfg.set(e.target.value)}
+                                                                className="w-full bg-zinc-900 border border-zinc-800 p-2.5 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder={cfg.placeholder} />
+                                                            <p className="text-[10px] text-zinc-600">Each name is passed to the CLI's <code className="text-zinc-400">-m</code> flag and becomes a selectable <code className="text-zinc-400">{cfg.prefix}.&lt;name&gt;</code> model. Use this when the CLI's default model isn't available to your account.</p>
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         )}
 

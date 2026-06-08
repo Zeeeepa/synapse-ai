@@ -362,9 +362,23 @@ async def get_models():
         except Exception:
             return True, BEDROCK_FALLBACK, ["bedrock.amazon.titan-embed-text-v1"]
 
+    def _cli_custom_models(setting_key: str, prefix: str) -> list[str]:
+        """Turn a comma-separated custom-model setting into cli.<provider>.<name>
+        entries. Skips blanks and anything already carrying the prefix."""
+        raw = (settings.get(setting_key) or "").strip()
+        out: list[str] = []
+        for name in raw.split(","):
+            name = name.strip()
+            if not name:
+                continue
+            out.append(name if name.startswith(prefix) else f"{prefix}{name}")
+        return out
+
     async def fetch_claude_cli() -> tuple[bool, list[str], list[str]]:
         import shutil
-        models = [
+        if not shutil.which("claude"):
+            return False, [], []
+        models = _cli_custom_models("anthropic_cli_models", "cli.claude.") + [
             "cli.claude.claude-sonnet-4-6",
             "cli.claude.claude-sonnet-4-6-thinking",
             "cli.claude.claude-opus-4-6",
@@ -374,22 +388,57 @@ async def get_models():
             "cli.claude.claude-opus-4-5-20251101",
             "cli.claude.claude-opus-4-5-20251101-thinking",
             "cli.claude"
-        ] if shutil.which("claude") else []
-        return bool(models), models, []
+        ]
+        return True, models, []
 
     async def fetch_gemini_cli() -> tuple[bool, list[str], list[str]]:
         import shutil
-        models = [
+        if not shutil.which("gemini"):
+            return False, [], []
+        models = _cli_custom_models("gemini_cli_models", "cli.gemini.") + [
             "cli.gemini.pro",
             "cli.gemini.flash",
             "cli.gemini"
-        ] if shutil.which("gemini") else []
-        return bool(models), models, []
+        ]
+        return True, models, []
+
+    def _codex_cached_models() -> list[str]:
+        """Surface the models this account is actually entitled to, read from
+        codex's local cache (~/.codex/models_cache.json, or $CODEX_HOME). Codex's
+        compiled-in default model — used by a bare `cli.codex` with no -m — can be
+        one the account can't use (e.g. ChatGPT accounts get gpt-5.4, not the
+        default gpt-5.x-codex), which 400s. Listing the real entitlements lets the
+        user pick a working model without knowing the names."""
+        import json
+        home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+        try:
+            with open(os.path.join(home, "models_cache.json"), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            entries = []
+            for m in data.get("models", []):
+                slug = m.get("slug")
+                # visibility "list" = user-selectable; skip hidden/internal models
+                if not slug or m.get("visibility") != "list" or not m.get("supported_in_api", True):
+                    continue
+                entries.append((m.get("priority", 999), slug))
+            entries.sort(key=lambda x: x[0])
+            return [f"cli.codex.{slug}" for _, slug in entries]
+        except Exception:
+            return []
 
     async def fetch_codex_cli() -> tuple[bool, list[str], list[str]]:
         import shutil
-        models = ["cli.codex"] if shutil.which("codex") else []
-        return bool(models), models, []
+        if not shutil.which("codex"):
+            return False, [], []
+        # Order: user custom entries, then account-entitled models from the cache,
+        # then bare `cli.codex` (defers to codex's own default, which may mismatch
+        # the account and 400 — so it's last). Dedupe, preserving order.
+        seen, models = set(), []
+        for m in _cli_custom_models("codex_cli_models", "cli.codex.") + _codex_cached_models() + ["cli.codex"]:
+            if m not in seen:
+                seen.add(m)
+                models.append(m)
+        return True, models, []
 
     async def fetch_github_copilot_cli() -> tuple[bool, list[str], list[str]]:
         import shutil
@@ -407,7 +456,7 @@ async def get_models():
                 return False, [], []
         except Exception:
             return False, [], []
-        models = await _fetch_copilot_models()
+        models = _cli_custom_models("github_copilot_cli_models", "cli.copilot.") + await _fetch_copilot_models()
         return True, models, []
 
     async def fetch_openai_compatible() -> tuple[bool, list[str], list[str]]:

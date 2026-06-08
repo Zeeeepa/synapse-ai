@@ -90,6 +90,13 @@ class Settings(BaseModel):
     local_compatible_embed_models: str = ""  # Comma-separated embedding model names for local v1-compatible
     huggingface_token: str = ""  # Optional HF access token (required for gated models like Llama, Gemma)
     huggingface_models: str = ""  # Comma- or newline-separated HF model IDs (e.g. Qwen/Qwen2.5-7B-Instruct)
+    # Comma-separated custom model names for the local CLI session providers.
+    # Each entry becomes a selectable cli.<provider>.<name> model (e.g. "gpt-5.4"
+    # → cli.codex.gpt-5.4), passed to the CLI via its -m/--model flag at call time.
+    anthropic_cli_models: str = ""
+    gemini_cli_models: str = ""
+    codex_cli_models: str = ""
+    github_copilot_cli_models: str = ""
     huggingface_max_new_tokens: int = 1024  # Max tokens to generate per HF call
     # Transform step Python execution runtime: "docker" (sandboxed, default) or
     # "host" (unsandboxed subprocess on host — needed for torch/GPU workloads,
