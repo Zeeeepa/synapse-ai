@@ -80,7 +80,16 @@ async def aggregate_all_tools(agent_sessions, active_agent, custom_tools_list):
     """
     all_tools = []
     tool_schema_map = {}  # name -> inputSchema
-    
+
+    # tool_router is the single source of truth for dispatch (name -> session).
+    # A tool name can be exposed by multiple native MCP servers (e.g.
+    # read_file_by_lines in both file_reader and code_search); we use this map
+    # to declare only the copy from the server that will actually service the
+    # call. Deferred import avoids a circular import at module load — aggregation
+    # always runs per-request, long after startup has populated the map.
+    from core import server as _server
+    tool_router = getattr(_server, "tool_router", {}) or {}
+
     allowed_tools = active_agent.get("tools", ["all"])
 
     # Auto-inject default tools based on agent type.
@@ -133,12 +142,19 @@ async def aggregate_all_tools(agent_sessions, active_agent, custom_tools_list):
                 if "all" in allowed_tools or prefixed in allowed_tools:
                     all_tools.append(VirtualTool(prefixed, t.description, t.inputSchema))
         else:
-            if "all" in allowed_tools:
-                all_tools.extend(session_tools)
-            else:
-                for t in session_tools:
-                    if t.name in allowed_tools:
-                        all_tools.append(t)
+            candidate = session_tools if "all" in allowed_tools \
+                else [t for t in session_tools if t.name in allowed_tools]
+            for t in candidate:
+                # A tool name can be exposed by multiple native MCP servers
+                # (e.g. read_file_by_lines in BOTH file_reader and code_search).
+                # tool_router decides which server services a call (last to
+                # register at startup wins). Declare only the copy from that
+                # server, so the LLM sees the schema of the impl that runs — and
+                # Gemini never receives a duplicate function declaration.
+                routed = tool_router.get(t.name)
+                if routed and routed[0] != session_name:
+                    continue
+                all_tools.append(t)
 
     # Populate schema map for MCP tools
     for t in all_tools:
@@ -168,6 +184,20 @@ async def aggregate_all_tools(agent_sessions, active_agent, custom_tools_list):
             vt = VirtualTool(bt_name, fn.get("description", ""), fn.get("parameters", {"type": "object"}))
             all_tools.append(vt)
             tool_schema_map[vt.name] = vt.inputSchema
+
+    # Safety net: guarantee at most one declaration per tool name across ALL
+    # sources (MCP + virtual + custom + builder) before sending to the LLM.
+    # Gemini rejects duplicate function declarations outright; the tool_router
+    # gate above handles MCP-vs-MCP collisions, this catches cross-source ones.
+    seen_names = set()
+    deduped = []
+    for t in all_tools:
+        if t.name in seen_names:
+            print(f"DEBUG: ⚠️ Skipping duplicate tool declaration '{t.name}'", flush=True)
+            continue
+        seen_names.add(t.name)
+        deduped.append(t)
+    all_tools = deduped
 
     # Build Ollama-formatted tools list
     ollama_tools = [
