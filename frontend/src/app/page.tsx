@@ -497,6 +497,11 @@ export default function Home() {
   // Accumulate LLM thoughts per active step during streaming
   const pendingThoughtsRef = useRef<string[]>([]);
   const pendingReasoningRef = useRef<string[]>([]);
+  // Tool currently shown in the loading indicator. We keep the last tool's label
+  // visible until a genuinely NEW tool starts (tool_execution). Without this, a
+  // delegate agent's wrapper `delegate_to_agent` tool_result would clobber the
+  // sub-agent's last real tool the instant the sub-agent returns.
+  const lastToolRef = useRef<string | null>(null);
   // SSE abort controller — cancelled on new chat, unmount, or confirmed Settings navigation
   const sseAbortRef = useRef<AbortController | null>(null);
   // Persists across SSE calls: true once orchestration_complete is received
@@ -750,6 +755,7 @@ export default function Home() {
     setIsThinking(false);
     pendingThoughtsRef.current = [];
     pendingReasoningRef.current = [];
+    lastToolRef.current = null;
 
     // Try SSE streaming first
     try {
@@ -793,6 +799,7 @@ export default function Home() {
         break;
 
       case 'tool_execution': {
+        lastToolRef.current = data.tool_name as string;
         const toolDisplayName = (data.tool_name as string)
           .replace(/_/g, ' ')
           .replace(/\b\w/g, (l: string) => l.toUpperCase());
@@ -804,6 +811,14 @@ export default function Home() {
 
       case 'tool_result': {
         const rawToolName = data.tool_name as string || 'Tool';
+        // Only update the indicator if this result is for the tool currently
+        // shown. A wrapper tool finishing (e.g. delegate_to_agent) after a
+        // sub-agent ran its own tools must NOT overwrite the sub-agent's last
+        // activity — keep the last tool until a new tool is called.
+        if (rawToolName !== lastToolRef.current) {
+          setIsThinking(false);
+          break;
+        }
         const resultToolName = rawToolName
           .replace(/_/g, ' ')
           .replace(/\b\w/g, (l: string) => l.toUpperCase());
@@ -1491,31 +1506,40 @@ export default function Home() {
                 {/* Dropdown on Hover */}
                 <div className="absolute right-0 top-full mt-0 w-64 bg-zinc-950 border border-zinc-800 p-2 shadow-2xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 transition-all pointer-events-none group-hover:pointer-events-auto z-50 max-h-[60vh] overflow-y-auto custom-scrollbar">
                   <div className="space-y-1">
-                    {systemStatus?.agents && Object.entries(systemStatus.agents).map(([id, info]) => {
-                      const isActive = systemStatus.active_agent_id === id;
-                      // Handle legacy string vs new object structure if backend update lags (safety)
-                      const name = typeof info === 'string' ? id : info.name;
-                      const status = typeof info === 'string' ? info : info.status;
+                    {(() => {
+                      // Hide native-builder machinery agents (ids prefixed `agent_native_builder`);
+                      // show only user-facing agents.
+                      const visibleAgents = systemStatus?.agents
+                        ? Object.entries(systemStatus.agents).filter(([id]) => !id.startsWith('agent_native_builder'))
+                        : [];
 
-                      return (
-                        <button
-                          key={id}
-                          onClick={() => handleSwitchAgent(id)}
-                          className={cn(
-                            "nav-button w-full flex items-center justify-between px-3 py-2 text-xs uppercase tracking-wider text-left border border-transparent hover:border-zinc-700 transition-all",
-                            isActive ? "bg-zinc-900 text-white border-zinc-800" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/50"
-                          )}>
-                          <div className="flex items-center gap-2">
-                            <div className={cn("h-1.5 w-1.5 rounded-full", status === 'online' ? "bg-green-500 shadow-[0_0_5px_#22c55e]" : "bg-red-500")}></div>
-                            <span className="truncate max-w-[200px]">{name}</span>
-                          </div>
-                          {isActive && <div className="h-1.5 w-1.5 bg-white rounded-full animate-pulse"></div>}
-                        </button>
-                      );
-                    })}
-                    {(!systemStatus?.agents || Object.keys(systemStatus.agents).length === 0) && (
-                      <div className="text-xs text-zinc-500 italic px-3 py-2">No agents detected.</div>
-                    )}
+                      if (visibleAgents.length === 0) {
+                        return <div className="text-xs text-zinc-500 italic px-3 py-2">No agents detected.</div>;
+                      }
+
+                      return visibleAgents.map(([id, info]) => {
+                        const isActive = systemStatus?.active_agent_id === id;
+                        // Handle legacy string vs new object structure if backend update lags (safety)
+                        const name = typeof info === 'string' ? id : info.name;
+                        const status = typeof info === 'string' ? info : info.status;
+
+                        return (
+                          <button
+                            key={id}
+                            onClick={() => handleSwitchAgent(id)}
+                            className={cn(
+                              "nav-button w-full flex items-center justify-between px-3 py-2 text-xs uppercase tracking-wider text-left border border-transparent hover:border-zinc-700 transition-all",
+                              isActive ? "bg-zinc-900 text-white border-zinc-800" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/50"
+                            )}>
+                            <div className="flex items-center gap-2">
+                              <div className={cn("h-1.5 w-1.5 rounded-full", status === 'online' ? "bg-green-500 shadow-[0_0_5px_#22c55e]" : "bg-red-500")}></div>
+                              <span className="truncate max-w-[200px]">{name}</span>
+                            </div>
+                            {isActive && <div className="h-1.5 w-1.5 bg-white rounded-full animate-pulse"></div>}
+                          </button>
+                        );
+                      });
+                    })()}
                   </div>
                 </div>
               </div>
