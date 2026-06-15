@@ -1039,10 +1039,16 @@ async def run_agent_step(
                             source=source,
                             run_id=run_id,
                         ):
-                            # Yield sub-agent events so the UI shows progress
-                            yield {**sub_event, "delegate_from": agent_id_for_session, "delegate_agent_name": agent_name}
                             if sub_event.get("type") == "final":
+                                # Capture only — do NOT propagate. A delegate sub-agent's
+                                # final has no orch_step_id, so chat.py would treat it as the
+                                # top-level final and emit `done`, closing the stream before
+                                # the delegate can reason / re-delegate. The sub-agent's answer
+                                # still surfaces via the tool_result preview below.
                                 sub_final = sub_event.get("response", "")
+                                continue
+                            # Yield non-final sub-agent events so the UI shows progress
+                            yield {**sub_event, "delegate_from": agent_id_for_session, "delegate_agent_name": agent_name}
                     except Exception as e:
                         sub_final = f"Error: Sub-agent '{agent_name}' failed: {e}"
                         print(f"DEBUG: ❌ Delegate sub-agent failed: {e}", flush=True)
